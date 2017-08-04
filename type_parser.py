@@ -195,8 +195,8 @@ void %s::Encode(xml_node *node_p) const {
 #include <boost/algorithm/string/trim.hpp>
 #include <pugixml/pugixml.hpp>
 
-#ifdef _WINDOWS
-#include <linux/time.h>
+#ifdef _WIN64
+#include <posix_time.h>
 #else
 #include <time.h>
 #endif
