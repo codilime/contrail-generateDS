@@ -3,7 +3,8 @@
 #
 
 from ifmap_global import CamelCase
-from ifmap_model import IFMapIdentifier, IFMapProperty, IFMapLink, IFMapLinkAttr
+from ifmap_model import IFMapIdentifier, IFMapProperty, IFMapLink, \
+    IFMapLinkAttr, AmbiguousParentType
 from TypeGenerator import TypeGenerator
 from collections import OrderedDict
 
@@ -20,7 +21,7 @@ _BASE_PARENT_IMID = 'contrail:config-root:root'
 
 def write(gen_file, gen_str):
     gen_file.write("%s\n" %(gen_str))
-#end write
+# end write
 
 class IFMapApiGenerator(object):
     def __init__(self, xsd_parser, xsd_root, ident_dict, metadata_dict):
@@ -30,10 +31,10 @@ class IFMapApiGenerator(object):
         self._metadata_dict = metadata_dict
         # [<tenant>,...]")
         self._FQ_NAME_TENANT_IDX = 0
-    #end __init__
+    # end __init__
 
     def Generate(self, gen_filepath_pfx):
-        xsd_openapi_dict = {}
+        xsd_openapi_dict = OrderedDict([])
         # Grab directory where to generate (if not locally)
         gen_filename_pfx = os.path.basename(gen_filepath_pfx)
         self._type_genr = TypeGenerator(self._xsd_parser)
@@ -64,11 +65,13 @@ class IFMapApiGenerator(object):
             gen_filename_pfx, xsd_openapi_dict)
         self._generate_docs_asciidoc(gendir + "contrail_openapi.adoc",
             gen_filename_pfx, openapi_dict)
+        self._generate_docs_sphinx(gendir + "contrail_openapi.rst",
+            gen_filename_pfx, openapi_dict)
         # With generation above, html doc can be built as:
         # asciidoctor build/debug/api-lib/vnc_api/gen/contrail_openapi.adoc \
         #             --backend html5 --doctype book -a toc=left -a toclevels=3 \
         #             -a numbered= -a sectlinks=  -a sectanchors= -a hardbreaks=
-    #end Generate
+    # end Generate
 
     def _non_exclude_idents(self):
         _ret_idents = []
@@ -80,11 +83,11 @@ class IFMapApiGenerator(object):
             _ret_idents.append(ident)
 
         return _ret_idents
-    #end _non_exclude_idents
+    # end _non_exclude_idents
 
     def _generate_package(self, gendir):
         gen_file = self._xsd_parser.makeFile(gendir + "__init__.py")
-    #end _generate_package
+    # end _generate_package
 
     def _generate_common_classes(self, gen_filepath_pfx):
         # XSD types to python classes
@@ -97,6 +100,11 @@ class IFMapApiGenerator(object):
         write(gen_file, "This module defines the classes for every configuration element managed by the system")
         write(gen_file, '"""')
         write(gen_file, "")
+        write(gen_file, "try:")
+        write(gen_file, "    from cfgm_common.exceptions import AmbiguousParentError")
+        write(gen_file, "except ImportError:")
+        write(gen_file, "    pass")
+        write(gen_file, "")
 
         for ident in self._non_exclude_idents():
             class_name = CamelCase(ident.getName())
@@ -107,14 +115,57 @@ class IFMapApiGenerator(object):
 
             write(gen_file, "class %s(object):" %(class_name))
             write(gen_file, '    """')
-            write(gen_file, "    Represents %s configuration representation." %(ident_name))
+
+            # Document description for object
+            description = ident.getElement().attrs.get('description')
+            if not description:
+                description = ''
+                for parent_ident, parent_link, _ in ident.getParents() or []:
+                    if len(ident.getParents()) > 1:
+                        indent = ' '*8
+                        description += ' '*4 + 'When parent is %s:\n%s' %(parent_ident.getName(), indent)
+                        description += ('\n'+indent).join(parent_link.getDescription(width=100))
+                        description += '\n'
+                    else:
+                        indent = ' '*4
+                        description += indent
+                        description += ('\n'+indent).join(parent_link.getDescription(width=100))
+
+            write(gen_file, description)
             write(gen_file, "")
+
+            # Document created-by for object
+            created_by = ident.getElement().attrs.get('created-by')
+            write(gen_file, "    Created By:")
+            if created_by:
+                write(gen_file, "        %s" %(created_by))
+            elif parents and len(parents) == 1:
+                (parent_ident, meta, _) = parents[0]
+                if (parent_ident.getName().lower() == 'config-root' or
+                    meta.getPresence().lower() != 'system-only'):
+                    created_by = 'User'
+                else:
+                    created_by = 'System'
+                write(gen_file, "        %s" %(created_by))
+            else:
+                for i in range(len(parents or [])):
+                    (parent_ident, meta, _) = parents[i]
+                    if meta.getPresence().lower() != 'system-only':
+                        created_by = 'User'
+                    else:
+                        created_by = 'System'
+                    parent_class_name = CamelCase(parent_ident.getName())
+                    write(gen_file, "        %s when parent is :class:`.%s`" %(
+                        created_by, parent_class_name))
+            write(gen_file, "")
+
+            # Document parents for object
             if parents:
                 write(gen_file, "    Child of:")
                 for i in range(len(parents)):
-                    (parent_ident, meta) = parents[i]
+                    (parent_ident, meta, _) = parents[i]
                     parent_class_name = CamelCase(parent_ident.getName())
-                    if i == len(parents):
+                    if i == len(parents)-1:
                         write(gen_file, "        :class:`.%s` object" %(parent_class_name))
                     else:
                         write(gen_file, "        :class:`.%s` object OR" %(parent_class_name))
@@ -246,7 +297,8 @@ class IFMapApiGenerator(object):
                 name = prop.getName().replace('-', '_')
                 is_complex = prop.getCType() is not None
                 simple_type = prop.getElement().getSimpleType()
-                xsd_type = prop.getElement().getType().replace('xsd:', '')
+                prop_type = prop.getElement().getType()
+                xsd_type = prop_type.replace('xsd:', '')
                 restrictions = None
                 restriction_type = None
                 if simple_type:
@@ -261,6 +313,8 @@ class IFMapApiGenerator(object):
                 description = prop.getDescription(width=100)
                 presence = prop.getPresence()
                 operations = prop.getOperations()
+                default = prop.getElement().getDefault()
+                mapped_default = self._type_genr._LangGenr.getMappedDefault(prop_type, default)
                 prop_field_types.append("'%s': %s" %(name,
                                         {'is_complex': is_complex,
                                          'restrictions': restrictions,
@@ -269,7 +323,8 @@ class IFMapApiGenerator(object):
                                          'required': presence,
                                          'operations': operations,
                                          'simple_type': simple_type,
-                                         'xsd_type': xsd_type}))
+                                         'xsd_type': xsd_type,
+                                         'default' : eval(mapped_default)}))
             write(gen_file, '    prop_field_types = {\n        %s\n    }\n' %(
                   ',\n        '.join(prop_field_types)))
             write(gen_file, "")
@@ -298,7 +353,7 @@ class IFMapApiGenerator(object):
             write(gen_file, "")
             children_field_type_vals = [('%ss' %(child_ident.getName().replace('-', '_')),
                                          (child_ident.getName(),
-                                          child_ident.isDerived()))
+                                          child_ident.isDerived(ident)))
                                         for child_ident in ident.getChildren()]
             write(gen_file, "    children_field_types = {}")
             for child_field, (child_type, is_derived) in children_field_type_vals:
@@ -306,7 +361,7 @@ class IFMapApiGenerator(object):
                     %(child_field, child_type, is_derived))
             write(gen_file, "")
             if parents:
-                p_class_names = [p_ident.getName() for p_ident, _ in parents
+                p_class_names = [p_ident.getName() for p_ident, _, _ in parents
                                  if p_ident.getName() != 'config-root']
                 write(gen_file, "    parent_types = %s" %(p_class_names))
             else:
@@ -399,29 +454,32 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        else: # No parent obj specified")
                 if len(parents) > 1:
                     # use config-root if it is one of the possible parents
-                    if 'config-root' in [parent_ident.getName() for (parent_ident, meta) in parents]:
+                    if 'config-root' in [parent_ident.getName() for (parent_ident, meta, _) in parents]:
                         write(gen_file, "            fq_name = [name]")
                     else:
                         write(gen_file, "            # if obj constructed from within server, ignore if parent not specified")
                         write(gen_file, "            if not kwargs['parent_type']:")
-                        parent_fq_names = [parent_ident.getDefaultFQName() for (parent_ident, meta) in parents]
+                        parent_fq_names = [parent_ident.getDefaultFQName() for (parent_ident, meta, _) in parents]
                         write(gen_file, "                raise AmbiguousParentError(\"%s\")" %(parent_fq_names))
                 else: # only one possible parent
-                    (parent_ident, meta) = parents[0]
+                    (parent_ident, meta, _) = parents[0]
                     if parent_ident.getName() == _BASE_PARENT:
                         write(gen_file, "            self.fq_name = [name]")
-                    else: # parent is not config-root
+                    else: # parent is not config-root, but parent might have >1 parents
                         parent_name = parent_ident.getName()
-                        parent_default_fq_name = parent_ident.getDefaultFQName()
-                        write(gen_file, "            self.parent_type = '%s'" %(parent_name))
-                        write(gen_file, "            self.fq_name = %s" %(parent_default_fq_name))
-                        write(gen_file, "            self.fq_name.append(name)")
+                        try:
+                            parent_default_fq_name = parent_ident.getDefaultFQName()
+                            write(gen_file, "            self.parent_type = '%s'" %(parent_name))
+                            write(gen_file, "            self.fq_name = %s" %(parent_default_fq_name))
+                            write(gen_file, "            self.fq_name.append(name)")
+                        except AmbiguousParentType as e:
+                            write(gen_file, "            raise AmbiguousParentError(\"%s\")" %(e))
                         write(gen_file, "")
-                    #end parent is config-root check
-                #end num possible parents check
+                    # end parent is config-root check
+                # end num possible parents check
             else: # no parent in schema
                 write(gen_file, "        self.fq_name = [name]")
-            #end parents exist in schema check
+            # end parents exist in schema check
 
             write(gen_file, "")
 
@@ -431,30 +489,30 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        if %s is not None:" %(prop_name))
                 write(gen_file, "            self._%s = %s" %(prop_name, prop_name))
 
-            write(gen_file, "    #end __init__")
+            write(gen_file, "    # end __init__")
             write(gen_file, "")
 
             # Getters for type independent fields
             write(gen_file, "    def get_type(self):")
             write(gen_file, '        """Return object type (%s)."""' %(ident_name))
             write(gen_file, "        return self._type")
-            write(gen_file, "    #end get_type")
+            write(gen_file, "    # end get_type")
             write(gen_file, "")
             write(gen_file, "    def get_fq_name(self):")
             write(gen_file, '        """Return FQN of %s in list form."""' %(ident_name))
             write(gen_file, "        return self.fq_name")
-            write(gen_file, "    #end get_fq_name")
+            write(gen_file, "    # end get_fq_name")
             write(gen_file, "")
             write(gen_file, "    def get_fq_name_str(self):")
             write(gen_file, '        """Return FQN of %s as colon delimited string."""' %(ident_name))
             write(gen_file, "        return ':'.join(self.fq_name)")
-            write(gen_file, "    #end get_fq_name_str")
+            write(gen_file, "    # end get_fq_name_str")
             write(gen_file, "")
             if parents:
                 write(gen_file, "    @property")
                 write(gen_file, "    def parent_name(self):")
                 write(gen_file, "        return self.fq_name[:-1][-1]")
-                write(gen_file, "    #end parent_name")
+                write(gen_file, "    # end parent_name")
                 write(gen_file, "")
                 write(gen_file, "    def get_parent_fq_name(self):")
                 write(gen_file, '        """Return FQN of %s\'s parent in list form."""' %(ident_name))
@@ -463,7 +521,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            return None")
                 write(gen_file, "")
                 write(gen_file, "        return self.fq_name[:-1]")
-                write(gen_file, "    #end get_parent_fq_name")
+                write(gen_file, "    # end get_parent_fq_name")
                 write(gen_file, "")
                 write(gen_file, "    def get_parent_fq_name_str(self):")
                 write(gen_file, '        """Return FQN of %s\'s parent as colon delimted string."""' %(ident_name))
@@ -472,27 +530,27 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            return None")
                 write(gen_file, "")
                 write(gen_file, "        return ':'.join(self.fq_name[:-1])")
-                write(gen_file, "    #end get_parent_fq_name_str")
+                write(gen_file, "    # end get_parent_fq_name_str")
                 write(gen_file, "")
 
             # Getters and Setters for common fields
             write(gen_file, "    @property")
             write(gen_file, "    def uuid(self):")
             write(gen_file, "        return getattr(self, '_uuid', None)")
-            write(gen_file, "    #end uuid")
+            write(gen_file, "    # end uuid")
             write(gen_file, "")
             write(gen_file, "    @uuid.setter")
             write(gen_file, "    def uuid(self, uuid_val):")
             write(gen_file, "        self._uuid = uuid_val")
-            write(gen_file, "    #end uuid")
+            write(gen_file, "    # end uuid")
             write(gen_file, "")
             write(gen_file, "    def set_uuid(self, uuid_val):")
             write(gen_file, "        self.uuid = uuid_val")
-            write(gen_file, "    #end set_uuid")
+            write(gen_file, "    # end set_uuid")
             write(gen_file, "")
             write(gen_file, "    def get_uuid(self):")
             write(gen_file, "        return self.uuid")
-            write(gen_file, "    #end get_uuid")
+            write(gen_file, "    # end get_uuid")
             write(gen_file, "")
 
             # Getters and Setters for properties
@@ -507,7 +565,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, '        ')
                 write(gen_file, '        """')
                 write(gen_file, "        return getattr(self, '_%s', None)" %(prop_name))
-                write(gen_file, "    #end %s" %(prop_name))
+                write(gen_file, "    # end %s" %(prop_name))
                 write(gen_file, "")
                 write(gen_file, "    @%s.setter" %(prop_name))
                 write(gen_file, "    def %s(self, %s):" %(prop_name, prop_name))
@@ -517,15 +575,15 @@ class IFMapApiGenerator(object):
                 write(gen_file, '        ')
                 write(gen_file, '        """')
                 write(gen_file, "        self._%s = %s" %(prop_name, prop_name))
-                write(gen_file, "    #end %s" %(prop_name))
+                write(gen_file, "    # end %s" %(prop_name))
                 write(gen_file, "")
                 write(gen_file, "    def set_%s(self, value):" %(prop_name))
                 write(gen_file, "        self.%s = value" %(prop_name))
-                write(gen_file, "    #end set_%s" %(prop_name))
+                write(gen_file, "    # end set_%s" %(prop_name))
                 write(gen_file, "")
                 write(gen_file, "    def get_%s(self):" %(prop_name))
                 write(gen_file, "        return self.%s" %(prop_name))
-                write(gen_file, "    #end get_%s" %(prop_name))
+                write(gen_file, "    # end get_%s" %(prop_name))
                 write(gen_file, "")
 
             write(gen_file, "    def _serialize_field_to_json(self, serialized, fields_to_serialize, field_name):")
@@ -533,7 +591,7 @@ class IFMapApiGenerator(object):
             write(gen_file, "            serialized[field_name] = getattr(self, field_name)")
             write(gen_file, "        elif field_name in fields_to_serialize:")
             write(gen_file, "            serialized[field_name] = getattr(self, field_name)")
-            write(gen_file, "    #end _serialize_field_to_json")
+            write(gen_file, "    # end _serialize_field_to_json")
             write(gen_file, "")
             write(gen_file, "    def serialize_to_json(self, field_names = None):")
             write(gen_file, "        serialized = {}")
@@ -564,7 +622,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            self._serialize_field_to_json(serialized, field_names, '%s_refs')" %(to_name))
 
             write(gen_file, "        return serialized")
-            write(gen_file, "    #end serialize_to_json")
+            write(gen_file, "    # end serialize_to_json")
 
             write(gen_file, "")
 
@@ -580,7 +638,7 @@ class IFMapApiGenerator(object):
                 # only getter from parent to children
                 write(gen_file, "    def get_%ss(self):" %(child_name))
                 write(gen_file, "        return getattr(self, '%ss', None)" %(child_name))
-                write(gen_file, "    #end get_%ss" %(child_name))
+                write(gen_file, "    # end get_%ss" %(child_name))
                 write(gen_file, "")
 
             for link_info in ident.getLinksInfo():
@@ -619,7 +677,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        if ref_obj.uuid:")
                 write(gen_file, "            self.%s_refs[0]['uuid'] = ref_obj.uuid" %(to_name))
                 write(gen_file, "")
-                write(gen_file, "    #end set_%s" %(to_name))
+                write(gen_file, "    # end set_%s" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def add_%s(%s):" %(to_name, add_one_args))
                 write(gen_file, '        """Add %s to %s.' %(to_ident.getName(), ident_name))
@@ -648,7 +706,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            ref_info['uuid'] = ref_obj.uuid")
                 write(gen_file, "")
                 write(gen_file, "        self.%s_refs.append(ref_info)" %(to_name))
-                write(gen_file, "    #end add_%s" %(to_name))
+                write(gen_file, "    # end add_%s" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def del_%s(%s):" %(to_name, del_one_args))
                 write(gen_file, "        refs = self.get_%s_refs()" %(to_name))
@@ -659,7 +717,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            if ref['to'] == ref_obj.get_fq_name():")
                 write(gen_file, "                self.%s_refs.remove(ref)" %(to_name))
                 write(gen_file, "                return")
-                write(gen_file, "    #end del_%s" %(to_name))
+                write(gen_file, "    # end del_%s" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def set_%s_list(%s):" %(to_name, set_list_args))
                 write(gen_file, '        """Set %s list for %s.' %(to_ident.getName(), ident_name))
@@ -670,7 +728,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, '        ')
                 write(gen_file, '        """')
                 write(gen_file, "        self.%s_refs = %s" %(to_name, set_list_val))
-                write(gen_file, "    #end set_%s_list" %(to_name))
+                write(gen_file, "    # end set_%s_list" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def get_%s_refs(self):" %(to_name))
                 write(gen_file, '        """Return %s list for %s.' %(to_ident.getName(), ident_name))
@@ -683,7 +741,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, '        ')
                 write(gen_file, '        """')
                 write(gen_file, "        return getattr(self, '%s_refs', None)" %(to_name))
-                write(gen_file, "    #end get_%s_refs" %(to_name))
+                write(gen_file, "    # end get_%s_refs" %(to_name))
                 write(gen_file, "")
 
             # Getters for back reference links
@@ -693,7 +751,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "    def get_%s_back_refs(self):" %(from_name))
                 write(gen_file, '        """Return list of all %ss using this %s"""' % (from_ident.getName(),ident_name))
                 write(gen_file, "        return getattr(self, '%s_back_refs', None)" %(from_name))
-                write(gen_file, "    #end get_%s_back_refs" %(from_name))
+                write(gen_file, "    # end get_%s_back_refs" %(from_name))
                 write(gen_file, "")
 
             # dump method
@@ -722,13 +780,13 @@ class IFMapApiGenerator(object):
                 from_ident = ident.getBackLinkFrom(back_link_info)
                 from_ident_name = from_ident.getName().replace('-', '_')
                 write(gen_file, "        print 'BCK %s = ', self.get_%s_back_refs()" %(from_ident_name, from_ident_name))
-            write(gen_file, "    #end dump")
+            write(gen_file, "    # end dump")
             write(gen_file, "")
 
-            write(gen_file, "#end class %s" %(class_name))
+            write(gen_file, "# end class %s" %(class_name))
             write(gen_file, "")
 
-    #end _generate_common_classes
+    # end _generate_common_classes
 
     def _generate_client_classes(self, gen_filepath_pfx, gen_filename_pfx):
         gen_file = self._xsd_parser.makeFile(gen_filepath_pfx + "_client.py")
@@ -739,6 +797,7 @@ class IFMapApiGenerator(object):
         write(gen_file, "import copy")
         write(gen_file, "import vnc_api.gen.%s_common" %(gen_filename_pfx))
         write(gen_file, "import vnc_api.gen.%s_xsd" %(gen_filename_pfx))
+        write(gen_file, "from cfgm_common.exceptions import NoIdError")
         write(gen_file, "")
 
         write(gen_file, "")
@@ -752,19 +811,11 @@ class IFMapApiGenerator(object):
             write(gen_file, "    resource_uri_base = {}")
 
             # init args are name, parent_obj(if there is one), props
-            init_args = "self, name = None"
+            init_args = "self, name=None"
             super_args = "name"
             if parents:
-                init_args = init_args + ", parent_obj = None"
+                init_args = init_args + ", parent_obj=None"
                 super_args = super_args + ", parent_obj"
-
-            for prop in ident.getProperties():
-                prop_name = prop.getName().replace('-', '_')
-                prop_type = prop.getElement().getType()
-                default = prop.getElement().getDefault()
-                mapped_default = self._type_genr._LangGenr.getMappedDefault(prop_type, default)
-                init_args = init_args + ", %s=%s" %(prop_name, mapped_default)
-                super_args = super_args + ", %s" %(prop_name)
 
             write(gen_file, "    def __init__(%s, *args, **kwargs):" %(init_args))
             if parents:
@@ -774,9 +825,12 @@ class IFMapApiGenerator(object):
             write(gen_file, "")
             write(gen_file, "        self._server_conn = None")
             write(gen_file, "")
-            for prop in ident.getProperties():
+            for prop_index, prop in enumerate(ident.getProperties()):
                 prop_name = prop.getName().replace('-', '_')
-                write(gen_file, "        if %s is not None:" %(prop_name))
+                prop_type = prop.getElement().getType()
+                default = prop.getElement().getDefault()
+                mapped_default = self._type_genr._LangGenr.getMappedDefault(prop_type, default)
+                write(gen_file, "        if len(args) > %d or '%s' in kwargs:" % (prop_index, prop_name))
                 write(gen_file, "            pending_fields.append('%s')" %(prop_name))
 
             write(gen_file, "")
@@ -788,26 +842,26 @@ class IFMapApiGenerator(object):
             write(gen_file, "        self._pending_ref_updates = set([])")
             write(gen_file, "")
             write(gen_file, "        super(%s, self).__init__(%s, *args, **kwargs)" %(class_name, super_args))
-            write(gen_file, "    #end __init__")
+            write(gen_file, "    # end __init__")
             write(gen_file, "")
             write(gen_file, "    def get_pending_updates(self):")
             write(gen_file, "        return self._pending_field_updates")
-            write(gen_file, "    #end get_pending_updates")
+            write(gen_file, "    # end get_pending_updates")
             write(gen_file, "")
             write(gen_file, "    def get_ref_updates(self):")
             write(gen_file, "        return self._pending_ref_updates")
-            write(gen_file, "    #end get_ref_updates")
+            write(gen_file, "    # end get_ref_updates")
             write(gen_file, "")
             write(gen_file, "    def clear_pending_updates(self):")
             write(gen_file, "        self._pending_field_updates = set([])")
             write(gen_file, "        self._pending_field_list_updates = {}")
             write(gen_file, "        self._pending_field_map_updates = {}")
             write(gen_file, "        self._pending_ref_updates = set([])")
-            write(gen_file, "    #end clear_pending_updates")
+            write(gen_file, "    # end clear_pending_updates")
             write(gen_file, "")
             write(gen_file, "    def set_server_conn(self, vnc_api_handle):")
             write(gen_file, "        self._server_conn = vnc_api_handle")
-            write(gen_file, "    #end set_server_conn")
+            write(gen_file, "    # end set_server_conn")
             write(gen_file, "")
             write(gen_file, "    @classmethod")
             write(gen_file, "    def from_dict(cls, **kwargs):")
@@ -895,7 +949,7 @@ class IFMapApiGenerator(object):
 
             write(gen_file, "")
             write(gen_file, "        return obj")
-            write(gen_file, "    #end from_dict")
+            write(gen_file, "    # end from_dict")
             write(gen_file, "")
 
             # Setters for common fields
@@ -904,11 +958,11 @@ class IFMapApiGenerator(object):
             write(gen_file, "        self._uuid = uuid_val")
             write(gen_file, "        if 'uuid' not in self._pending_field_updates:")
             write(gen_file, "            self._pending_field_updates.add('uuid')")
-            write(gen_file, "    #end uuid")
+            write(gen_file, "    # end uuid")
             write(gen_file, "")
             write(gen_file, "    def set_uuid(self, uuid_val):")
             write(gen_file, "        self.uuid = uuid_val")
-            write(gen_file, "    #end set_uuid")
+            write(gen_file, "    # end set_uuid")
             write(gen_file, "")
 
             # Setters for properties
@@ -936,11 +990,11 @@ class IFMapApiGenerator(object):
                     write(gen_file, "            del self._pending_field_map_updates['%s']" %(prop_name))
                     write(gen_file, "")
                 write(gen_file, "        self._%s = %s" %(prop_name, prop_name))
-                write(gen_file, "    #end %s" %(prop_name))
+                write(gen_file, "    # end %s" %(prop_name))
                 write(gen_file, "")
                 write(gen_file, "    def set_%s(self, value):" %(prop_name))
                 write(gen_file, "        self.%s = value" %(prop_name))
-                write(gen_file, "    #end set_%s" %(prop_name))
+                write(gen_file, "    # end set_%s" %(prop_name))
                 write(gen_file, "")
 
             # Atomic Setters for properties that are lists
@@ -961,7 +1015,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        else:")
                 write(gen_file, "            self._pending_field_list_updates['%s'].append(" %(prop_name))
                 write(gen_file, "                ('add', elem_value, elem_position))")
-                write(gen_file, "    #end add_%s" %(prop_name))
+                write(gen_file, "    # end add_%s" %(prop_name))
                 write(gen_file, "")
                 write(gen_file, "    def del_%s(self, elem_position):" %(prop_name))
                 write(gen_file, '        """Delete element from %s for %s.' %(prop.getName(), ident.getName()))
@@ -975,7 +1029,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        else:")
                 write(gen_file, "            self._pending_field_list_updates['%s'].append(" %(prop_name))
                 write(gen_file, "                ('delete', None, elem_position))")
-                write(gen_file, "    #end del_%s" %(prop_name))
+                write(gen_file, "    # end del_%s" %(prop_name))
 
             # Atomic Setters for properties that are maps
             for prop in ident.getProperties():
@@ -995,7 +1049,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        else:")
                 write(gen_file, "            self._pending_field_map_updates['%s'].append(" %(prop_name))
                 write(gen_file, "                ('set', elem, elem_position))")
-                write(gen_file, "    #end set_%s" %(prop_name))
+                write(gen_file, "    # end set_%s" %(prop_name))
                 write(gen_file, "")
                 write(gen_file, "    def del_%s(self, elem_position):" %(prop_name))
                 write(gen_file, '        """Delete element from %s for %s.' %(prop.getName(), ident.getName()))
@@ -1009,7 +1063,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        else:")
                 write(gen_file, "            self._pending_field_map_updates['%s'].append(" %(prop_name))
                 write(gen_file, "                ('delete', None, elem_position))")
-                write(gen_file, "    #end del_%s" %(prop_name))
+                write(gen_file, "    # end del_%s" %(prop_name))
 
             # Setters for references
             for link_info in ident.getLinksInfo():
@@ -1031,7 +1085,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        self._pending_ref_updates.discard('%s_refs')" %(to_name))
                 write(gen_file, "        super(%s, self).set_%s(*args, **kwargs)" %(class_name, to_name))
                 write(gen_file, "")
-                write(gen_file, "    #end set_%s" %(to_name))
+                write(gen_file, "    # end set_%s" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def add_%s(self, *args, **kwargs):" %(to_name))
                 write(gen_file, '        """Add %s to %s.' %(to_ident.getName(), ident.getName()))
@@ -1045,14 +1099,14 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            self._pending_ref_updates.add('%s_refs')" %(to_name))
                 write(gen_file, "            self._original_%s_refs = copy.deepcopy(self.get_%s_refs() or [])" %(to_name, to_name))
                 write(gen_file, "        super(%s, self).add_%s(*args, **kwargs)" %(class_name, to_name))
-                write(gen_file, "    #end add_%s" %(to_name))
+                write(gen_file, "    # end add_%s" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def del_%s(self, *args, **kwargs):" %(to_name))
                 write(gen_file, "        if '%s_refs' not in self._pending_ref_updates:" %(to_name))
                 write(gen_file, "            self._pending_ref_updates.add('%s_refs')" %(to_name))
                 write(gen_file, "            self._original_%s_refs = (self.get_%s_refs() or [])[:]" %(to_name, to_name))
                 write(gen_file, "        super(%s, self).del_%s(*args, **kwargs)" %(class_name, to_name))
-                write(gen_file, "    #end del_%s" %(to_name))
+                write(gen_file, "    # end del_%s" %(to_name))
                 write(gen_file, "")
                 write(gen_file, "    def set_%s_list(self, *args, **kwargs):" %(to_name))
                 write(gen_file, '        """Set %s list for %s.' %(to_ident.getName(), ident.getName()))
@@ -1065,7 +1119,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        self._pending_field_updates.add('%s_refs')" %(to_name))
                 write(gen_file, "        self._pending_ref_updates.discard('%s_refs')" %(to_name))
                 write(gen_file, "        super(%s, self).set_%s_list(*args, **kwargs)" %(class_name, to_name))
-                write(gen_file, "    #end set_%s_list" %(to_name))
+                write(gen_file, "    # end set_%s_list" %(to_name))
                 write(gen_file, "")
 
             # Getters for children links
@@ -1080,12 +1134,15 @@ class IFMapApiGenerator(object):
                 write(gen_file, "            if not svr_conn:")
                 write(gen_file, "                return None")
                 write(gen_file, "")
-                write(gen_file, "            obj = svr_conn.%s_read(id = self.uuid, fields = ['%ss'])" %(method_name, child_method_name))
+                write(gen_file, "            try:")
+                write(gen_file, "                obj = svr_conn.%s_read(id = self.uuid, fields = ['%ss'])" %(method_name, child_method_name))
+                write(gen_file, "            except NoIdError:")
+                write(gen_file, "                return None")
                 write(gen_file, "            children = getattr(obj, '%ss', None)" %(child_method_name))
                 write(gen_file, "            self.%ss = children" %(child_method_name))
                 write(gen_file, "")
                 write(gen_file, "        return children")
-                write(gen_file, "    #end get_%ss" %(child_method_name))
+                write(gen_file, "    # end get_%ss" %(child_method_name))
                 write(gen_file, "")
             write(gen_file, "")
 
@@ -1105,17 +1162,20 @@ class IFMapApiGenerator(object):
                 write(gen_file, "        if not svr_conn:")
                 write(gen_file, "            return None")
                 write(gen_file, "")
-                write(gen_file, "        obj = svr_conn.%s_read(id = self.uuid, fields = ['%s_back_refs'])" %(method_name, from_name))
+                write(gen_file, "        try:")
+                write(gen_file, "            obj = svr_conn.%s_read(id = self.uuid, fields = ['%s_back_refs'])" %(method_name, from_name))
+                write(gen_file, "        except NoIdError:")
+                write(gen_file, "            return None")
                 write(gen_file, "        back_refs = getattr(obj, '%s_back_refs', None)" %(from_name))
                 write(gen_file, "        self.%s_back_refs = back_refs" %(from_name))
                 write(gen_file, "")
                 write(gen_file, "        return back_refs")
-                write(gen_file, "    #end get_%s_back_refs" %(from_name))
+                write(gen_file, "    # end get_%s_back_refs" %(from_name))
                 write(gen_file, "")
 
-            write(gen_file, "#end class %s" %(class_name))
+            write(gen_file, "# end class %s" %(class_name))
             write(gen_file, "")
-    #end _generate_client_classes
+    # end _generate_client_classes
 
     def _create_heat_template_params(self, prop_list):
         # print parameters
@@ -1145,7 +1205,7 @@ class IFMapApiGenerator(object):
                     write(self.gen_file_templ, "    # required: optional")
                 continue
             self._create_heat_template_params(val['prop_list'])
-    #end _create_heat_template_params
+    # end _create_heat_template_params
 
     def _create_heat_template_resources(self, prop_list, tabs, comma):
         # print resources
@@ -1182,7 +1242,7 @@ class IFMapApiGenerator(object):
                 write(self.gen_file_templ, "%s}]%s" %(" "*tabs, tcomma))
                 tabs = tabs-2
                 comma = ""
-    #end _create_heat_template_resources
+    # end _create_heat_template_resources
 
     def _create_heat_env_params(self, prop_list):
         # print env parameters
@@ -1204,7 +1264,7 @@ class IFMapApiGenerator(object):
                 elif prop_type == 'STRING':
                     write(self.gen_file_env, "  %s: '%s'" %(prop_long_name, val['prop_restr'][0]))
             self._create_heat_env_params(val['prop_list'])
-    #end _create_heat_env_params
+    # end _create_heat_env_params
 
     def _get_heat_prop_type(self, typename, is_array):
         if typename.lower().endswith(
@@ -1223,7 +1283,7 @@ class IFMapApiGenerator(object):
             type = "LIST:" + type
 
         return type
-    #end _get_heat_prop_type
+    # end _get_heat_prop_type
 
     def _convert_heat_template_type(self, prop_type):
         if prop_type == "INTEGER" or prop_type == "LIST:INTEGER":
@@ -1255,7 +1315,7 @@ class IFMapApiGenerator(object):
             'prop_is_list': is_list,
         })
         return prop_list[-1]
-    #end _make_heat_prop_list
+    # end _make_heat_prop_list
 
     def _process_heat_complex_property(self, cls, prop_list, prop_name,
                                        prop_type, is_simple, is_array,
@@ -1289,7 +1349,7 @@ class IFMapApiGenerator(object):
             self._process_heat_complex_property(new_cls, new_list, attr_name,
                 attr_type, (not attr_is_complex), attr_is_array,
                 attr_description, attr_reqd, opers, new_prop_get_list)
-    #end _process_heat_complex_property
+    # end _process_heat_complex_property
 
     def _make_heat_property_schema(self, val, tabs):
         prop_long_name = self._get_prop_long_name(val)
@@ -1328,7 +1388,7 @@ class IFMapApiGenerator(object):
                 write(self.gen_file, "%s)" %(tabs*" "))
         tabs = tabs-4
         write(self.gen_file, "%s)," %(tabs*" "))
-    #end _make_heat_property_schema
+    # end _make_heat_property_schema
 
     def _make_heat_properties(self, prop_list, prop_names_list,
                               prop_names_uc_list):
@@ -1339,7 +1399,7 @@ class IFMapApiGenerator(object):
             if val['prop_list']:
                 self._make_heat_properties(val['prop_list'], prop_names_list,
                                            prop_names_uc_list)
-    #end _make_heat_properties
+    # end _make_heat_properties
 
     def _get_prop_hierarchy(self, prop, print_index):
         if self.heat_handling == 0:
@@ -1360,7 +1420,7 @@ class IFMapApiGenerator(object):
         prop_long_name = self._get_prop_long_name(prop)
         prop_get_str += ".get(self.%s)%s" %(prop_long_name.upper(), idx_str)
         return prop_get_str
-    #end _get_prop_hierarchy
+    # end _get_prop_hierarchy
 
     def _get_prop_long_name(self, prop):
         prop_get_str = ""
@@ -1370,7 +1430,7 @@ class IFMapApiGenerator(object):
             prop_get_str += "%s_" %(value['prop_name'])
         prop_get_str += "%s" %(prop['prop_name'])
         return prop_get_str
-    #end _get_prop_long_name
+    # end _get_prop_long_name
 
     def _set_heat_properties_value(self, prop, tabs, obj_index, skip, is_ref_update):
         if prop['prop_name'].endswith("_refs"):
@@ -1403,7 +1463,7 @@ class IFMapApiGenerator(object):
 
         if is_ref_update:
             write(self.gen_file, "%sref_data_list.append(obj_%s)" %(" "*tabs, obj_index+1))
-    #end _set_heat_properties_value
+    # end _set_heat_properties_value
 
     def _get_heat_properties_value(self, prop, p_prop_name):
         if not prop['prop_list']:
@@ -1414,7 +1474,7 @@ class IFMapApiGenerator(object):
         for key,val in enumerate(prop['prop_list']):
             self._get_heat_properties_value(
                 val, p_prop_name+".get_"+val['prop_name']+"()")
-    #end _get_heat_properties_value
+    # end _get_heat_properties_value
 
     def _gen_heat_common_resource_hdr(self):
         write(self.gen_file, "")
@@ -1442,7 +1502,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "")
         write(self.gen_file, "class Contrail%s(contrail.ContrailResource):" \
               %(self.resource_dict['class']))
-    #end _gen_heat_common_resource_hdr
+    # end _gen_heat_common_resource_hdr
 
     def _build_heat_properties(self):
         for prop_name in self.cls.prop_fields:
@@ -1468,7 +1528,7 @@ class IFMapApiGenerator(object):
             self._process_heat_complex_property(cls, self.prop_list,
                 prop_name, prop_type, prop_is_simple, False,
                 prop_desc, prop_reqd, prop_opers, [])
-     #end _build_heat_properties
+     # end _build_heat_properties
 
     def _build_heat_refs(self):
         for ref_name in self.cls.ref_fields:
@@ -1489,14 +1549,14 @@ class IFMapApiGenerator(object):
             self._process_heat_complex_property(cls, self.ref_list,
                 ref_name, ref_type, False, True,
                 ref_desc, None, None, [])
-     #end _build_heat_refs
+     # end _build_heat_refs
 
     def _build_heat_parents(self):
         for parent_name in self.cls.parent_types:
             pname = parent_name.replace('-', '_')
             self._make_heat_prop_list(self.parent_list, pname, 'string',
                 None, None, None, None, False, [], False)
-     #end _build_heat_parents
+     # end _build_heat_parents
 
     def _gen_heat_properties(self, prop_names_list, prop_names_uc_list):
         write(self.gen_file, "    PROPERTIES = (")
@@ -1505,7 +1565,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "        %s" %(", ".join(prop_names_list)))
         write(self.gen_file, "    )")
         write(self.gen_file, "")
-    #end _gen_heat_properties
+    # end _gen_heat_properties
 
     def _gen_heat_templ_params(self):
         write(self.gen_file_templ, "heat_template_version: 2015-04-30")
@@ -1519,7 +1579,7 @@ class IFMapApiGenerator(object):
         self._create_heat_template_params(self.ref_list)
         self._create_heat_template_params(self.parent_list)
         write(self.gen_file_templ, "")
-    #end _gen_heat_templ_params
+    # end _gen_heat_templ_params
 
     def _gen_heat_env_params(self):
         write(self.gen_file_env, "parameters:")
@@ -1527,7 +1587,7 @@ class IFMapApiGenerator(object):
         self._create_heat_env_params(self.ref_list)
         self._create_heat_env_params(self.parent_list)
         write(self.gen_file_env, "")
-    #end _gen_heat_env_params
+    # end _gen_heat_env_params
 
     def _gen_heat_properties_schema(self):
         tabs = 4
@@ -1578,7 +1638,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "%supdate_allowed_keys = ('Properties',)" %(" "*tabs))
         write(self.gen_file, "")
 
-    #end _gen_heat_properties_schema
+    # end _gen_heat_properties_schema
 
     def _ref_create_handling(self):
         tabs = 8
@@ -1804,7 +1864,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "")
         write(self.gen_file, "%sself.resource_id_set(obj_uuid)" %(" "*tabs))
         write(self.gen_file, "")
-    #end _gen_heat_handle_create
+    # end _gen_heat_handle_create
 
     def _gen_heat_handle_update(self):
         tabs = 4
@@ -1846,7 +1906,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "%sraise Exception(_('%%s') %% str(e))" %(" "*tabs))
         write(self.gen_file, "")
 
-    #end _gen_heat_handle_update
+    # end _gen_heat_handle_update
 
     def _gen_heat_handle_delete(self):
         write(self.gen_file, "    @contrail.set_auth_token")
@@ -1862,7 +1922,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "            LOG.warn(_('%s %%s already deleted.') %% self.name)"
             %(self.resource_dict['method']))
         write(self.gen_file, "")
-    #end _gen_heat_handle_delete
+    # end _gen_heat_handle_delete
 
     def _gen_heat_show_resource(self):
         write(self.gen_file, "    @contrail.set_auth_token")
@@ -1873,7 +1933,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "        return obj_dict")
         write(self.gen_file, "")
         write(self.gen_file, "")
-    #end _gen_heat_show_resource
+    # end _gen_heat_show_resource
 
     def _gen_heat_resource_mapping(self):
         class_name = self.resource_dict['class']
@@ -1881,7 +1941,7 @@ class IFMapApiGenerator(object):
         write(self.gen_file, "    return {")
         write(self.gen_file, "        'OS::ContrailV2::%s': Contrail%s," %(class_name, class_name))
         write(self.gen_file, "    }")
-    #end _gen_heat_resource_mapping
+    # end _gen_heat_resource_mapping
 
     def _gen_heat_templ_resource_section(self):
         # generate template resource section
@@ -1895,7 +1955,7 @@ class IFMapApiGenerator(object):
         self._create_heat_template_resources(self.ref_list, 6, "")
         self._create_heat_template_resources(self.parent_list, 6, "")
         write(self.gen_file_templ, "")
-    #end _gen_heat_templ_resource_section
+    # end _gen_heat_templ_resource_section
 
     def _uncamelize(self, name):
         s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
@@ -2037,7 +2097,7 @@ class IFMapApiGenerator(object):
 
             # generate template parameters section
             self._gen_heat_env_params()
-    #end _generate_heat_resources
+    # end _generate_heat_resources
 
     def _generate_test_classes(self, gen_filepath_pfx, gen_filename_pfx):
         gen_file = self._xsd_parser.makeFile(gen_filepath_pfx + "_test.py")
@@ -2140,7 +2200,7 @@ class IFMapApiGenerator(object):
                 prop_name = prop.getName().replace('-', '_')
                 write(gen_file, "        self.%s = %s" % (prop_name, prop_name))
 
-            write(gen_file, "    #end __init__")
+            write(gen_file, "    # end __init__")
             write(gen_file, "")
             write(gen_file, "    def _update_links (self, update_server):")
             for link_info in ident.getLinksInfo():
@@ -2154,7 +2214,7 @@ class IFMapApiGenerator(object):
                         write(gen_file, "            self.add_%s (ln.fixture (), update_server = update_server, add_link = False)" \
                                                                % (ident.getLinkTo(link_info).getName().replace ('-', '_')))
             write(gen_file, "        return None")
-            write(gen_file, "    #end _update_links")
+            write(gen_file, "    # end _update_links")
             write(gen_file, "")
             for link_info in ident.getLinksInfo():
                 if ident.isLinkRef(link_info):
@@ -2203,12 +2263,12 @@ class IFMapApiGenerator(object):
                                         ident.getName().replace ('-', '_'),
                                         ident.getLinkTo(link_info).getName().replace('-', '_'),
                                         str (link_info[2])))
-                    write(gen_file, "    #end add_%s_link" % (ident.getLinkTo(link_info).getName().replace ('-', '_')))
+                    write(gen_file, "    # end add_%s_link" % (ident.getLinkTo(link_info).getName().replace ('-', '_')))
                     write(gen_file, "")
                     write(gen_file, "    def get_%ss (self):" % (ident.getLinkTo(link_info).getName().replace ('-', '_')))
                     write(gen_file, "        return self.get_links ('%s')" % (
                                     ident.getLinkTo(link_info).getName().replace ('-', '_')))
-                    write(gen_file, "    #end get_%ss" % (ident.getLinkTo(link_info).getName().replace ('-', '_')))
+                    write(gen_file, "    # end get_%ss" % (ident.getLinkTo(link_info).getName().replace ('-', '_')))
             write(gen_file, "")
             write(gen_file, "    def populate (self):")
             for prop in ident.getProperties():
@@ -2224,7 +2284,7 @@ class IFMapApiGenerator(object):
                         popstr = 'vnc_api.gen.%s_xsd.%s.populate()' % (gen_filename_pfx, ctype)
                 write(gen_file, "        self._obj.set_%s(self.%s or %s)" % (
                             prop_name, prop_name, popstr))
-            write(gen_file, "    #end populate")
+            write(gen_file, "    # end populate")
             write(gen_file, "")
             write(gen_file, "    def setUp(self):")
             write(gen_file, "        super(%sTestFixtureGen, self).setUp()" %(class_name))
@@ -2235,11 +2295,11 @@ class IFMapApiGenerator(object):
                     write(gen_file, "        self._obj = vnc_api.%s(self._name)" %(class_name))
                 else:
                     if len(parents) > 1:
-                        parent_fq_names = [parent_ident.getDefaultFQName() for (parent_ident, meta) in parents]
+                        parent_fq_names = [parent_ident.getDefaultFQName() for (parent_ident, meta, _) in parents]
                         write(gen_file, "        if not self._parent_fixt:")
                         write(gen_file, "            raise AmbiguousParentError(\"%s\")" %(parent_fq_names))
                     else: # single parent in schema
-                        (parent_ident, meta) = parents[0]
+                        (parent_ident, meta, _) = parents[0]
                         parent_name = parent_ident.getName()
                         parent_class_name = CamelCase(parent_name)
                         write(gen_file, "        if not self._parent_fixt:")
@@ -2265,7 +2325,7 @@ class IFMapApiGenerator(object):
             write(gen_file, "            self._conn_drv.%s_create(self._obj)" %(method_name))
             write(gen_file, "            # read back for server allocated values")
             write(gen_file, "            self._obj = self._conn_drv.%s_read(id = self._obj.uuid)" %(method_name))
-            write(gen_file, "    #end setUp")
+            write(gen_file, "    # end setUp")
             write(gen_file, "")
             write(gen_file, "    def cleanUp(self):")
             write(gen_file, "        try:")
@@ -2287,15 +2347,15 @@ class IFMapApiGenerator(object):
                 write(gen_file, "                    parent_obj.%ss.remove(child_obj)" %(method_name))
                 write(gen_file, "                    break")
                 write(gen_file, "")
-            write(gen_file, "    #end cleanUp")
+            write(gen_file, "    # end cleanUp")
             write(gen_file, "")
             write(gen_file, "    def getObj(self):")
             write(gen_file, "        return self._obj")
-            write(gen_file, "    #end getObj")
+            write(gen_file, "    # end getObj")
             write(gen_file, "")
-            write(gen_file, "#end class %sTestFixtureGen" %(class_name))
+            write(gen_file, "# end class %sTestFixtureGen" %(class_name))
             write(gen_file, "")
-    #end _generate_test_classes
+    # end _generate_test_classes
 
     def _generate_conn_drv_impl(self, gen_fname, gen_type_pfx):
         gen_file = self._xsd_parser.makeFile(gen_fname)
@@ -2317,7 +2377,7 @@ class IFMapApiGenerator(object):
         write(gen_file, "    @abc.abstractmethod")
         write(gen_file, "    def __init__(self):")
         write(gen_file, "        pass")
-        write(gen_file, "    #end __init__")
+        write(gen_file, "    # end __init__")
 
         for ident in self._non_exclude_idents():
             ident_name = ident.getName()
@@ -2332,7 +2392,7 @@ class IFMapApiGenerator(object):
             write(gen_file, '        ')
             write(gen_file, '        """')
             write(gen_file, "        raise NotImplementedError, '%s_create is %%s\\'s responsibility' %% (str(type (self)))" % method_name)
-            write(gen_file, "    #end %s_create" %(method_name))
+            write(gen_file, "    # end %s_create" %(method_name))
             write(gen_file, "")
 
             write(gen_file, "    def %s_read(self, fq_name = None, fq_name_str = None, id = None, ifmap_id = None):" \
@@ -2347,7 +2407,7 @@ class IFMapApiGenerator(object):
             write(gen_file, '        ')
             write(gen_file, '        """')
             write(gen_file, "        raise NotImplementedError, '%s_read is %%s\\'s responsibility' %% (str(type (self)))" % method_name)
-            write(gen_file, "    #end %s_read" %(method_name))
+            write(gen_file, "    # end %s_read" %(method_name))
             write(gen_file, "")
 
             write(gen_file, "    def %s_update(self, obj):" %(method_name))
@@ -2357,7 +2417,7 @@ class IFMapApiGenerator(object):
             write(gen_file, '        ')
             write(gen_file, '        """')
             write(gen_file, "        raise NotImplementedError, '%s_update is %%s\\'s responsibility' %% (str(type (self)))" % method_name)
-            write(gen_file, "    #end %s_update" %(method_name))
+            write(gen_file, "    # end %s_update" %(method_name))
             write(gen_file, "")
 
             list_args = "self"
@@ -2380,7 +2440,7 @@ class IFMapApiGenerator(object):
                 write(gen_file, '        """List all %ss."""' % (ident_name))
             write(gen_file, "        raise NotImplementedError, '%ss_list is %%s\\'s responsibility' %% (str(type (self)))" % method_name)
 
-            write(gen_file, "    #end %ss_list" %(method_name))
+            write(gen_file, "    # end %ss_list" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def %s_delete(self, fq_name = None, id = None, ifmap_id = None):" \
                                      %(method_name))
@@ -2392,18 +2452,18 @@ class IFMapApiGenerator(object):
             write(gen_file, '        ')
             write(gen_file, '        """')
             write(gen_file, "        raise NotImplementedError, '%s_delete is %%s\\'s responsibility' %% (str(type (self)))" % method_name)
-            write(gen_file, "    #end %s_delete" %(method_name))
+            write(gen_file, "    # end %s_delete" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def get_default_%s_id(self):" %(method_name))
             write(gen_file, '        """Return UUID of default %s."""' %(ident_name))
             write(gen_file, "        raise NotImplementedError, 'get_default_%s_delete is %%s\\'s responsibility' %% (str(type (self)))" % method_name)
-            write(gen_file, "    #end get_default_%s_delete" %(method_name))
+            write(gen_file, "    # end get_default_%s_delete" %(method_name))
             write(gen_file, "")
 
-        write(gen_file, "#end class ConnectionDriverBase")
+        write(gen_file, "# end class ConnectionDriverBase")
         write(gen_file, "")
 
-    #end _generate_conn_drv_impl
+    # end _generate_conn_drv_impl
 
 
     def _generate_client_impl(self, gen_fname, gen_type_pfx):
@@ -2424,7 +2484,7 @@ class IFMapApiGenerator(object):
             write(gen_file, "    ('%s', '%s')," %
                   (ident_name.replace('-', '_'), ident_name))
         write(gen_file, "])")
-    #end _generate_client_impl
+    # end _generate_client_impl
 
     def _generate_extension_impl(self, gen_fname, gen_type_pfx):
         gen_file = self._xsd_parser.makeFile(gen_fname)
@@ -2441,28 +2501,28 @@ class IFMapApiGenerator(object):
             write(gen_file, "        Method called before %s is created" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end pre_%s_create" %(method_name))
+            write(gen_file, "    # end pre_%s_create" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def post_%s_create(self, resource_dict, **kwargs):" %(method_name))
             write(gen_file, '        """')
             write(gen_file, "        Method called after %s is created" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end post_%s_create" %(method_name))
+            write(gen_file, "    # end post_%s_create" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def pre_%s_read(self, resource_id, **kwargs):" %(method_name))
             write(gen_file, '        """')
             write(gen_file, "        Method called before %s is read" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end pre_%s_read" %(method_name))
+            write(gen_file, "    # end pre_%s_read" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def post_%s_read(self, resource_id, resource_dict, **kwargs):" %(method_name))
             write(gen_file, '        """')
             write(gen_file, "        Method called after %s is read" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end post_%s_read" %(method_name))
+            write(gen_file, "    # end post_%s_read" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def pre_%s_update(self, resource_id, resource_dict," %(method_name))
             write(gen_file, "            prop_collection_updates=None, ref_update=None, **kwargs):")
@@ -2470,7 +2530,7 @@ class IFMapApiGenerator(object):
             write(gen_file, "        Method called before %s is updated" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end pre_%s_update" %(method_name))
+            write(gen_file, "    # end pre_%s_update" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def post_%s_update(self, resource_id, resource_dict, old_dict," %(method_name))
             write(gen_file, "            prop_collection_updates=None, ref_update=None, **kwargs):")
@@ -2478,24 +2538,24 @@ class IFMapApiGenerator(object):
             write(gen_file, "        Method called after %s is updated" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end post_%s_update" %(method_name))
+            write(gen_file, "    # end post_%s_update" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def pre_%s_delete(self, resource_id, **kwargs):" %(method_name))
             write(gen_file, '        """')
             write(gen_file, "        Method called before %s is deleted" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end pre_%s_delete" %(method_name))
+            write(gen_file, "    # end pre_%s_delete" %(method_name))
             write(gen_file, "")
             write(gen_file, "    def post_%s_delete(self, resource_id, resource_dict, **kwargs):" %(method_name))
             write(gen_file, '        """')
             write(gen_file, "        Method called after %s is deleted" %(ident_name))
             write(gen_file, '        """')
             write(gen_file, "        pass")
-            write(gen_file, "    #end post_%s_delete" %(method_name))
+            write(gen_file, "    # end post_%s_delete" %(method_name))
             write(gen_file, "")
-        write(gen_file, "#end class ResourceApiGen")
-    #end _generate_extension_impl
+        write(gen_file, "# end class ResourceApiGen")
+    # end _generate_extension_impl
 
     def _generate_test_impl(self, gen_fname, gen_type_pfx):
         gen_file = self._xsd_parser.makeFile(gen_fname)
@@ -2519,11 +2579,11 @@ class IFMapApiGenerator(object):
             method_name = ident_name.replace('-', '_')
             write(gen_file, "    def test_%s_crud(self):" %(method_name))
             write(gen_file, "        self.useFixture(%sTestFixtureGen(self._vnc_lib))" %(camel_name))
-            write(gen_file, "    #end test_%s_crud" %(method_name))
+            write(gen_file, "    # end test_%s_crud" %(method_name))
             write(gen_file, "")
 
-        write(gen_file, "#end class %s" %(class_name))
-    #end _generate_test_impl
+        write(gen_file, "# end class %s" %(class_name))
+    # end _generate_test_impl
 
     def _generate_docs_schema(self, gen_fname, gen_type_pfx):
         gen_file = self._xsd_parser.makeFile(gen_fname)
@@ -2567,280 +2627,331 @@ class IFMapApiGenerator(object):
 
         write(gen_file, "")
         write(gen_file, "    return graph")
-        write(gen_file, "#end generate_schema_graph")
+        write(gen_file, "# end generate_schema_graph")
         write(gen_file, "")
         write(gen_file, "def write_schema_graph(graph, filename):")
         write(gen_file, "    graph.write_xdot(filename)")
-        write(gen_file, "#end write_schema_graph")
+        write(gen_file, "# end write_schema_graph")
         write(gen_file, "")
-    #end _generate_docs_schema
+    # end _generate_docs_schema
 
     def _generate_docs_openapi(self, gen_fname, gen_type_pfx, xsd_openapi_dict):
         gen_file = self._xsd_parser.makeFile(gen_fname)
         write(gen_file, "")
-        openapi_dict = OrderedDict({
-            'swagger': '2.0',
-            'info': OrderedDict({
-                'title': 'Contrail Configuration API',
-                'version': '1.0.0',
-            }),
-            'host': 'localhost:8082',
-            'basePath': '/',
-            'schemes': ['http'],
-            'produces': ['application/json'],
-            'consumes': ['application/json'],
-            #'securityDefinitions': {
-            #    'contrail_auth': {
-            #        'type': 'oauth2',
-            #        'authorizationUrl': 'http://www.opencontrail.org/oauth/dialog',
-            #        'flow': 'implicit',
-            #        'scopes': {
-            #            'write:resources': 'modify resources in your account',
-            #            'read:resources': 'read resources'
-            #        }
-            #    },
-            #    'api_key': {
-            #        'type': 'apiKey',
-            #        'name': 'api_key',
-            #        'in': 'header'
-            #    }
-            #},
-            'definitions': OrderedDict({
-                'Error': OrderedDict({
-                    'properties': OrderedDict({
-                        'message': OrderedDict({
-                            'type': 'string',
-                        }),
-                    }),
-                    'required': ['message'],
-                }),
-                'FQName': OrderedDict({
-                    'properties': OrderedDict({
-                        'fq_name': OrderedDict({
-                            'description': 'Fully Qualified Name of resource',
-                            'type': 'array',
-                            'items': OrderedDict({
-                                'type': 'string',
-                            }),
-                        }),
-                    }),
-                    'required': ['fq_name'],
-                }),
-                'Uuid': OrderedDict({
-                    'properties': OrderedDict({
-                        'uuid': OrderedDict({
-                            'type': 'string',
-                            'format': 'uuid',
-                        }),
-                    }),
-                    'required': ['uuid'],
-                }),
-                'Type': OrderedDict({
-                    'properties': OrderedDict({
-                        'type': OrderedDict({
-                            'type': 'string',
-                        }),
-                    }),
-                    'required': ['type'],
-                }),
-                'TypeFQName': OrderedDict({
-                   'allOf': [
+        openapi_dict = OrderedDict([
+            ('swagger', '2.0'),
+            ('info', OrderedDict([
+                ('title', 'Contrail Configuration API'),
+                ('version', '1.0.0'),
+            ])),
+            ('host', 'localhost:8082'),
+            ('basePath', '/'),
+            ('schemes', ['http']),
+            ('produces', ['application/json']),
+            ('consumes', ['application/json']),
+            ('definitions', OrderedDict([
+                ('Error', OrderedDict([
+                    ('properties', OrderedDict([
+                        ('message', OrderedDict([
+                            ('type', 'string'),
+                        ])),
+                    ])),
+                    ('required', ['message']),
+                ])),
+                ('FQName', OrderedDict([
+                    ('properties', OrderedDict([
+                        ('fq_name', OrderedDict([
+                            ('description', 'Fully Qualified Name of resource'),
+                            ('type', 'array'),
+                            ('items', OrderedDict([
+                                ('type', 'string'),
+                            ])),
+                        ])),
+                    ])),
+                    ('required', ['fq_name']),
+                ])),
+                ('Uuid', OrderedDict([
+                    ('properties', OrderedDict([
+                        ('uuid', OrderedDict([
+                            ('type', 'string'),
+                            ('format', 'uuid'),
+                        ])),
+                    ])),
+                    ('required', ['uuid']),
+                ])),
+                ('Type', OrderedDict([
+                    ('properties', OrderedDict([
+                        ('type', OrderedDict([
+                            ('type', 'string'),
+                        ])),
+                    ])),
+                    ('required', ['type']),
+                ])),
+                ('TypeFQName', OrderedDict([
+                   ('allOf', [
                        {'$ref': '#/definitions/Type'},
                        {'$ref': '#/definitions/FQName'},
-                   ],
-                }),
-                'Href': OrderedDict({
-                    'properties': OrderedDict({
-                        'href': OrderedDict({
-                            'type': 'string',
-                            'format': 'url',
-                        }),
-                    }),
-                    'required': ['href'],
-                }),
-                'To': OrderedDict({
-                    'properties': OrderedDict({
-                        'to': OrderedDict({
-                            'description': 'Fully Qualified Name of resource',
-                            'type': 'array',
-                            'items': OrderedDict({
-                                'type': 'string',
-                            }),
-                        }),
-                    }),
-                }),
-                'ResourceListSummary': OrderedDict({
-                    'allOf': [
+                   ]),
+                ])),
+                ('Href', OrderedDict([
+                    ('properties', OrderedDict([
+                        ('href', OrderedDict([
+                            ('type', 'string'),
+                            ('format', 'url'),
+                        ])),
+                    ])),
+                    ('required', ['href']),
+                ])),
+                ('To', OrderedDict([
+                    ('properties', OrderedDict([
+                        ('to', OrderedDict([
+                            ('description', 'Fully Qualified Name of resource'),
+                            ('type', 'array'),
+                            ('items', OrderedDict([
+                                ('type', 'string'),
+                            ])),
+                        ])),
+                    ])),
+                ])),
+                ('ResourceListSummary', OrderedDict([
+                    ('allOf', [
                         {'$ref': '#/definitions/FQName'},
                         {'$ref': '#/definitions/Uuid'},
                         {'$ref': '#/definitions/Href'},
-                    ],
-                }),
-                'ResourceReference': OrderedDict({
-                    'allOf': [
+                    ]),
+                ])),
+                ('ResourceReference', OrderedDict([
+                    ('allOf', [
                         {'$ref': '#/definitions/Href'},
                         {'$ref': '#/definitions/Uuid'},
                         {'$ref': '#/definitions/To'},
-                    ],
-                    'required': ['to'],
-                }),
-                'ResourceCommon': OrderedDict({
-                    'allOf': [
+                    ]),
+                    ('required', ['to']),
+                ])),
+                ('ResourceCommon', OrderedDict([
+                    ('allOf', [
                         {'$ref': '#/definitions/FQName'},
                         {'$ref': '#/definitions/Uuid'},
-                    ],
-                    'required': ['fq_name', 'uuid'],
-                }),
-                'ResourceWithParent': OrderedDict({
-                    'allOf': [
+                    ]),
+                    ('required', ['fq_name', 'uuid']),
+                ])),
+                ('ResourceWithParent', OrderedDict([
+                    ('allOf', [
                         {'$ref': '#/definitions/ResourceCommon'},
-                        {'properties': OrderedDict({
-                            'parent_type': OrderedDict({
-                                'type': 'string',
-                            }),
-                            'parent_uuid': OrderedDict({
-                                'type': 'string',
-                                'format': 'uuid',
-                            }),
-                        }),},
-                    ],
-                }),
-            }),
-            'tags': [
-                {
-                    'name': 'actions',
-                    'description': 'Actions common to all resources',
-                }
-            ],
-            'paths': OrderedDict({
-                '/id-to-fqname': OrderedDict({
-                    'post': OrderedDict({
-                        'tags': [ 'actions' ],
-                        'summary': 'Find type and fqname given resource id',
-                        'parameters': [
-                            OrderedDict({
-                                'name': 'uuid',
-                                'in': 'body',
-                                'schema': {
-                                    '$ref': '#/definitions/Uuid',
-                                },
-                                'required': True,
-                            }),
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/TypeFQName',
-                                }),
-                            }),
-                            '404': OrderedDict({
-                                'description': 'Not Found',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Error',
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-                '/fqname-to-id': OrderedDict({
-                    'post': OrderedDict({
-                        'tags': [ 'actions' ],
-                        'summary': 'Find resource id given its type and fqname',
-                        'parameters': [
-                            OrderedDict({
-                                'in': 'body',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/TypeFQName',
-                                }),
-                            }),
-                            #{
-                            #    'name': 'type',
-                            #    'in': 'body',
-                            #    'schema': {
-                            #        '$ref': '#/definitions/Type',
-                            #    },
-                            #    'required': True,
-                            #},
-                            #{
-                            #    'name': 'fq_name',
-                            #    'in': 'body',
-                            #    'schema': {
-                            #        '$ref': '#/definitions/FQName',
-                            #    },
-                            #    'required': True,
-                            #},
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
+                        {'properties': OrderedDict([
+                            ('parent_type', OrderedDict([
+                                ('type', 'string'),
+                            ])),
+                            ('parent_uuid', OrderedDict([
+                                ('type', 'string'),
+                                ('format', 'uuid'),
+                            ])),
+                        ]),},
+                    ]),
+                ])),
+            ])),
+            ('tags', [
+                OrderedDict([
+                    ('name', 'actions'),
+                    ('description', 'Actions common to all resources'),
+                ]),
+                OrderedDict([
+                    ('name', 'user-created'),
+                    ('description', 'User created resource'),
+                ]),
+                OrderedDict([
+                    ('name', 'system-created'),
+                    ('description', 'System created resource'),
+                ]),
+            ]),
+            ('paths', OrderedDict([
+                ('/id-to-fqname', OrderedDict([
+                    ('post', OrderedDict([
+                        ('tags', [ 'actions' ]),
+                        ('summary', 'Find type and fqname given resource id'),
+                        ('parameters', [
+                            OrderedDict([
+                                ('in', 'body'),
+                                ('schema', {
                                     '$ref': '#/definitions/Uuid',
                                 }),
-                            }),
-                            '404': OrderedDict({
-                                'description': 'Not Found',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Error',
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        })
+                                ('required', True),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/TypeFQName'),
+                                ])),
+                            ])),
+                            ('404', OrderedDict([
+                                ('description', 'Not Found'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Error'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                ])),
+                ('/fqname-to-id', OrderedDict([
+                    ('post', OrderedDict([
+                        ('tags', [ 'actions' ]),
+                        ('summary', 'Find resource id given its type and fqname'),
+                        ('parameters', [
+                            OrderedDict([
+                                ('in', 'body'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/TypeFQName'),
+                                ])),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Uuid'),
+                                ])),
+                            ])),
+                            ('404', OrderedDict([
+                                ('description', 'Not Found'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Error'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                ])),
+            ])),
+            ('x-datamodel', OrderedDict([
+                ('objects', OrderedDict({})),
+                ('common-properties', OrderedDict([
+                    ('id-perms', OrderedDict([
+                        ('description', ''),
+                        ('operations', 'CR'),
+                        ('created-by', 'User (optional)'),
+                        ('$ref', '#/definitions/IdPermsType'),
+                    ])),
+                    ('perms2', OrderedDict([
+                        ('description', ''),
+                        ('operations', 'CRU'),
+                        ('created-by', 'User (optional)'),
+                        ('$ref', '#/definitions/PermType2'),
+                    ])),
+                    ('annotations', OrderedDict([
+                        ('description', ''),
+                        ('operations', 'CRU'),
+                        ('created-by', 'User (optional)'),
+                    ])),
+                    ('display-name', OrderedDict([
+                        ('description', 'Display name user configured string(name) that can be updated any time. Used as openstack name.'),
+                        ('operations', 'CRU'),
+                        ('created-by', 'User (optional)'),
+                    ])),
+                ])),
+            ])),
+        ])
         openapi_dict['definitions'].update(
             xsd_openapi_dict['definitions'])
 
         definitions = openapi_dict['definitions']
         paths = openapi_dict['paths']
         tags = openapi_dict['tags']
+        datamodel_objects = openapi_dict['x-datamodel']['objects']
         for ident in sorted(self._non_exclude_idents(), key=lambda i: i.getName()):
             parents = ident.getParents()
             ident_name = ident.getName()
             camel_name = CamelCase(ident_name)
             method_name = ident_name.replace('-', '_')
-            tags.append(OrderedDict({
-                'name': ident_name,
-                'description': 'Operations on %s' %(ident_name),
-            }))
-            definitions.update(OrderedDict({
-                camel_name+'Create': {
-                    'allOf': [
+
+            tags.append(OrderedDict([
+                ('name', ident_name),
+                ('description', 'Operations on %s' %(ident_name)),
+            ]))
+            # Definitions init for ident
+            definitions.update(OrderedDict([
+                (camel_name+'Create', OrderedDict([
+                    ('allOf', [
                         {'$ref': '#/definitions/FQName'},
-                        {
-                            'properties': {},
-                            'required': [],
-                        },
-                    ],
-                },
-                camel_name+'Read': {
-                    'allOf': [
+                        OrderedDict([
+                            ('properties', OrderedDict()),
+                            ('required', []),
+                        ]),
+                    ]),
+                ])),
+                (camel_name+'ReadDetail', OrderedDict([
+                    ('allOf', [
                         {'$ref': '#/definitions/FQName'},
-                        {'properties': {}},
-                    ],
-                },
-                camel_name+'Update': OrderedDict({'properties': {}}),
-            }))
+                        {'properties': OrderedDict()},
+                    ]),
+                ])),
+                (camel_name+'ReadAll', OrderedDict([
+                    ('allOf', [
+                        {'$ref': '#/definitions/FQName'},
+                        {'properties': OrderedDict()},
+                    ]),
+                ])),
+                (camel_name+'Update', OrderedDict([
+                    ('properties', OrderedDict()),
+                ])),
+            ]))
             create_props = definitions[camel_name+'Create']['allOf'][1]['properties']
             create_required = definitions[camel_name+'Create']['allOf'][1]['required']
-            read_props = definitions[camel_name+'Read']['allOf'][1]['properties']
+            read_detail_props = definitions[camel_name+'ReadDetail']['allOf'][1]['properties']
+            read_all_props = definitions[camel_name+'ReadAll']['allOf'][1]['properties']
             update_props = definitions[camel_name+'Update']['properties']
+
             if parents:
                 # grab only non config-root parent types
                 parent_types = [p[0].getName() for p in parents if p[0].getName() != _BASE_PARENT]
                 if parent_types:
-                    create_props['parent_type'] = OrderedDict({
-                        'type': 'string',
-                        'enum': parent_types,
-                        'description': 'Parent resource type',
-                    })
+                    create_props['parent_type'] = OrderedDict([
+                        ('type', 'string'),
+                        ('enum', parent_types),
+                        ('description', 'Parent resource type'),
+                    ])
                     create_required.append('parent_type')
+
+            # Datamodel init for ident
+            datamodel_objects[ident_name] = OrderedDict([
+                ('description', ''),
+                ('parents', OrderedDict()),
+                ('properties', OrderedDict()),
+                ('references', OrderedDict()),
+            ])
+            datamodel_props = datamodel_objects[ident_name]['properties']
+            datamodel_refs = datamodel_objects[ident_name]['references']
+            # compute datamodel details for object
+            description = ident.getElement().attrs.get('description')
+            if not description:
+                description = ''
+                for parent_ident, parent_link, is_derived in ident.getParents() or []:
+                    parent_name = parent_ident.getName()
+                    if parent_name == _BASE_PARENT:
+                        continue
+                    if len(ident.getParents()) > 1:
+                        indent = ' '*4
+                        description += 'When parent is %s,\n%s' %(parent_ident.getName(), indent)
+                        description += ' '.join(parent_link.getDescription(width=100))
+                        description += '\n'
+                    else:
+                        description += ' '.join(parent_link.getDescription(width=100))
+
+                    datamodel_objects[ident_name]['parents'][parent_name] = OrderedDict([
+                        ('is_derived', is_derived)])
+
+            datamodel_objects[ident_name]['description'] = description
+
+            # Definitions + Datamodel init for props of ident
             for prop in ident.getProperties():
                 prop_name = prop.getName().replace('-', '_')
                 prop_xml_elem = prop.getElement()
                 complex_type = prop.getCType()
                 xsd_type = prop.getXsdType()
+                if prop.getName() in openapi_dict['x-datamodel']['common-properties']:
+                    is_common_prop = True
+                else:
+                    is_common_prop = False
                 enum_values = None
                 range_values = None
                 if xsd_type.startswith('xsd:'):
@@ -2849,8 +2960,9 @@ class IFMapApiGenerator(object):
                     type_name = prop.getElement().getType()
                     r_base = self._xsd_parser.SimpleTypeDict[xsd_type]
                     if r_base.values and isinstance(r_base.values[0], dict):
-                        range_values = {'minimum': r_base.values[0]['minimum'],
-                                        'maximum': r_base.values[1]['maximum']}
+                        range_values = OrderedDict([
+                            ('minimum', r_base.values[0]['minimum']),
+                            ('maximum', r_base.values[1]['maximum'])])
                     elif r_base.values:
                         enum_values = {'enum': r_base.values}
                 else: # complex
@@ -2862,63 +2974,86 @@ class IFMapApiGenerator(object):
                 description = prop.getDescription(width=100)
                 if description:
                     if isinstance(description, list):
-                        description_values = {'description': '\n'.join(description)}
+                        description_values = {'description': ' '.join(description)}
                     else:
                         description_values = {'description': description}
 
                 if type_name.startswith('xsd:'):
-                    if 'C' in operations:
-                        create_props[prop_name] = OrderedDict({
-                            'type': type_name.replace('xsd:','').replace(
-                                              'integer', 'number')})
-                    if 'R' in operations:
-                        read_props[prop_name] = OrderedDict({
-                            'type': type_name.replace('xsd:','').replace(
-                                              'integer', 'number')})
-                    if 'U' in operations:
-                        update_props[prop_name] = OrderedDict({
-                            'type': type_name.replace('xsd:','').replace(
-                                              'integer', 'number')})
+                    type_key = 'type'
+                    type_val = type_name.replace('xsd:','').replace(
+                                              'integer', 'number')
                 else:
-                    if 'C' in operations:
-                        create_props[prop_name] = OrderedDict({
-                            '$ref': '#/definitions/%s' %(type_name)})
-                    if 'R' in operations:
-                        read_props[prop_name] = OrderedDict({
-                            '$ref': '#/definitions/%s' %(type_name)})
-                    if 'U' in operations:
-                        update_props[prop_name] = OrderedDict({
-                            '$ref': '#/definitions/%s' %(type_name)})
+                    type_key = '$ref'
+                    type_val = '#/definitions/%s' %(type_name)
+
+                if 'C' in operations:
+                    create_props[prop_name] = OrderedDict([(type_key, type_val)])
+                if 'R' in operations:
+                    read_detail_props[prop_name] = OrderedDict([(type_key, type_val)])
+                    read_all_props[prop_name] = OrderedDict([(type_key, type_val)])
+                if 'U' in operations:
+                    update_props[prop_name] = OrderedDict([(type_key, type_val)])
+
+                if not is_common_prop:
+                    datamodel_props[prop.getName()] = OrderedDict([
+                        (type_key, type_val),
+                        ('operations', operations),
+                    ])
 
                 if enum_values:
                     if 'C' in operations:
                         create_props[prop_name].update(enum_values)
                     if 'R' in operations:
-                        read_props[prop_name].update(enum_values)
+                        read_detail_props[prop_name].update(enum_values)
+                        read_all_props[prop_name].update(enum_values)
                     if 'U' in operations:
                         update_props[prop_name].update(enum_values)
+
+                    if not is_common_prop:
+                        datamodel_props[prop.getName()].update(enum_values)
                 elif range_values:
                     if 'C' in operations:
                         create_props[prop_name].update(range_values)
                     if 'R' in operations:
-                        read_props[prop_name].update(range_values)
+                        read_detail_props[prop_name].update(range_values)
+                        read_all_props[prop_name].update(range_values)
                     if 'U' in operations:
                         update_props[prop_name].update(range_values)
+
+                    if not is_common_prop:
+                        datamodel_props[prop.getName()].update(range_values)
 
                 if description_values:
                     if 'C' in operations:
                         create_props[prop_name].update(description_values)
                     if 'R' in operations:
-                        read_props[prop_name].update(description_values)
+                        read_detail_props[prop_name].update(description_values)
+                        read_all_props[prop_name].update(description_values)
                     if 'U' in operations:
                         update_props[prop_name].update(description_values)
 
+                    if not is_common_prop:
+                        datamodel_props[prop.getName()].update(description_values)
+
                 if presence == 'required':
                     create_required.append(prop_name)
+
+                if not is_common_prop:
+                    if 'system-only' not in presence.lower():
+                        datamodel_props[prop.getName()]['created-by'] = 'user'
+                    else:
+                        datamodel_props[prop.getName()]['created-by'] = 'system'
+
+                    if 'required' in presence.lower():
+                        datamodel_props[prop.getName()]['required'] = True
+                    else:
+                        datamodel_props[prop.getName()]['required'] = False
             # end for all ident properties
+
             if not create_required:
                 del definitions[camel_name+'Create']['allOf'][1]['required']
 
+            # Definitions + Datamodel init for props of ident
             for link_info in ident.getLinksInfo():
                 link = ident.getLink(link_info)
                 to_ident = ident.getLinkTo(link_info)
@@ -2931,73 +3066,104 @@ class IFMapApiGenerator(object):
                 operations = link.getOperations()
                 link_attr_type = link.getXsdType()
                 if link_attr_type:
-                    definitions.update(OrderedDict({
-                        camel_name+to_class_name+'Refs': {
-                            'allOf': [
+                    definitions.update(OrderedDict([
+                        (camel_name+to_class_name+'Refs', OrderedDict([
+                            ('allOf', [
                                 {'$ref': '#/definitions/ResourceReference'},
                                 {'properties': {
                                     'attr': {
                                         '$ref': '#/definitions/%s' %(link_attr_type),
                                     },
                                 },},
-                            ],
-                        },
-                    }))
+                            ]),
+                        ])),
+                    ]))
                     if 'C' in operations:
-                        create_props['%s_refs' %(to_method_name)] = OrderedDict({
-                            'type': 'array',
-                            'items':  OrderedDict({
-                                '$ref': '#/definitions/%s%sRefs' %(camel_name, to_class_name),
-                            }),
-                            'description': 'List of %s references' %(
-                                to_ident.getName()),
-                        })
+                        create_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/%s%sRefs' %(camel_name, to_class_name)),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
                     if 'R' in operations:
-                        read_props['%s_refs' %(to_method_name)] = OrderedDict({
-                            'type': 'array',
-                            'items':  OrderedDict({
-                                '$ref': '#/definitions/%s%sRefs' %(camel_name, to_class_name),
-                            }),
-                            'description': 'List of %s references' %(
-                                to_ident.getName()),
-                        })
+                        read_detail_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/%s%sRefs' %(camel_name, to_class_name)),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
+                        read_all_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/%s%sRefs' %(camel_name, to_class_name)),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
                     if 'U' in operations:
-                        update_props['%s_refs' %(to_method_name)] = OrderedDict({
-                            'type': 'array',
-                            'items':  OrderedDict({
-                                '$ref': '#/definitions/%s%sRefs' %(camel_name, to_class_name),
-                            }),
-                            'description': 'List of %s references' %(
-                                to_ident.getName()),
-                        })
+                        update_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/%s%sRefs' %(camel_name, to_class_name)),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
                 else: # link without attr
                     if 'C' in operations:
-                        create_props['%s_refs' %(to_method_name)] = OrderedDict({
-                            'type': 'array',
-                            'items':  OrderedDict({
-                                '$ref': '#/definitions/ResourceReference',
-                            }),
-                            'description': 'List of %s references' %(
-                                to_ident.getName()),
-                        })
+                        create_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/ResourceReference'),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
                     if 'R' in operations:
-                        read_props['%s_refs' %(to_method_name)] = OrderedDict({
-                            'type': 'array',
-                            'items':  OrderedDict({
-                                '$ref': '#/definitions/ResourceReference',
-                            }),
-                            'description': 'List of %s references' %(
-                                to_ident.getName()),
-                        })
+                        read_detail_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/ResourceReference'),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
+                        read_all_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/ResourceReference'),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
                     if 'U' in operations:
-                        update_props['%s_refs' %(to_method_name)] = OrderedDict({
-                            'type': 'array',
-                            'items':  OrderedDict({
-                                '$ref': '#/definitions/ResourceReference',
-                            }),
-                            'description': 'List of %s references' %(
-                                to_ident.getName()),
-                        })
+                        update_props['%s_refs' %(to_method_name)] = OrderedDict([
+                            ('type', 'array'),
+                            ('items',  OrderedDict([
+                                ('$ref', '#/definitions/ResourceReference'),
+                            ])),
+                            ('description', 'List of %s references' %(
+                                to_ident.getName())),
+                        ])
+
+                if 'system-only' not in presence.lower():
+                    created_by = 'user'
+                else:
+                    created_by = 'system'
+                datamodel_refs[to_ident.getName()] = OrderedDict([
+                    ('created-by', created_by),
+                    ('required', 'required' in presence.lower()),
+                    ('operations', operations),
+                    ('description', '\n'.join(link.getDescription(width=100))),
+                ])
+                if link_attr_type:
+                    datamodel_refs[to_ident.getName()]['attr'] = OrderedDict([
+                        ('$ref', '#/definitions/%s' %(link_attr_type))
+                    ])
 
                 if presence == 'required':
                     create_required.append('%s_refs' %(to_method_name))
@@ -3013,186 +3179,294 @@ class IFMapApiGenerator(object):
                 from_class_name = CamelCase(from_ident.getName())
                 link_attr_type = back_link.getXsdType()
                 if link_attr_type:
-                    read_props['%s_back_refs' %(from_method_name)] = OrderedDict({
-                        'type': 'array',
-                        'items':  OrderedDict({
-                            '$ref': '#/definitions/%s%sRefs' %(from_class_name, camel_name),
-                        }),
-                        'description': 'List of %s back references' %(
-                            from_ident.getName()),
-                    })
+                    read_all_props['%s_back_refs' %(from_method_name)] = OrderedDict([
+                        ('type', 'array'),
+                        ('items',  OrderedDict([
+                            ('$ref', '#/definitions/%s%sRefs' %(from_class_name, camel_name)),
+                        ])),
+                        ('description', 'List of %s back references' %(
+                            from_ident.getName())),
+                    ])
                 else: # link without attr
-                    read_props['%s_back_refs' %(from_method_name)] = OrderedDict({
-                        'type': 'array',
-                        'items':  OrderedDict({
-                            '$ref': '#/definitions/ResourceReference',
-                        }),
-                        'description': 'List of %s references' %(
-                            from_ident.getName()),
-                    })
+                    read_all_props['%s_back_refs' %(from_method_name)] = OrderedDict([
+                        ('type', 'array'),
+                        ('items',  OrderedDict([
+                            ('$ref', '#/definitions/ResourceReference'),
+                        ])),
+                        ('description', 'List of %s references' %(
+                            from_ident.getName())),
+                    ])
             # end for all backrefs
 
-            paths.update(OrderedDict({
-                '/%s/{id}' %(ident_name): OrderedDict({
-                    'get': OrderedDict({
-                        'tags': [ ident_name ],
-                        'summary': 'Fetch a specific %s' %(ident_name),
-                        'parameters': [
-                            OrderedDict({
-                                'description': 'The id of resource',
-                                'in': 'path',
-                                'name': 'id',
-                                'required': True,
-                                'type': 'string'
-                            }),
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/%sRead' %(camel_name),
-                                }),
-                            }),
-                            '404': OrderedDict({
-                                'description': 'Not Found',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Error'
-                                }),
-                            }),
-                        }),
-                    }),
-                    'put': OrderedDict({
-                        'tags': [ ident_name ],
-                        'summary': 'Update a specific %s' %(ident_name),
-                        'parameters': [
-                            OrderedDict({
-                                'description': 'The id of resource',
-                                'in': 'path',
-                                'name': 'id',
-                                'required': True,
-                                'type': 'string'
-                            }),
-                            OrderedDict({
-                                'in': 'body',
-                                'name': '%s' %(ident_name),
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/%sUpdate' %(camel_name),
-                                }),
-                            }),
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Uuid'
-                                }),
-                            }),
-                            '404': OrderedDict({
-                                'description': 'Not Found',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Error'
-                                }),
-                            }),
-                        }),
-                    }),
-                    'delete': OrderedDict({
-                        'tags': [ ident_name ],
-                        'summary': 'Delete a specific %s' %(ident_name),
-                        'parameters': [
-                            OrderedDict({
-                                'description': 'The id of resource',
-                                'in': 'path',
-                                'name': 'id',
-                                'required': True,
-                                'type': 'string'
-                            }),
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Uuid'
-                                }),
-                            }),
-                            '404': OrderedDict({
-                                'description': 'Not Found',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Error'
-                                }),
-                            }),
-                            '409': OrderedDict({
-                                'description': 'Conflict',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Error'
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-                '/%ss' %(ident_name): OrderedDict({
-                    'get': OrderedDict({
-                        'tags': [ ident_name ],
-                        'summary': 'List collection of %s' %(ident_name),
-                        'parameters': [
-                            OrderedDict({
-                                'description': 'Report all fields of resource.',
-                                'in': 'query',
-                                'name': 'detail',
-                                'required': False,
-                                'type': 'boolean',
-                                'default': False,
-                            }),
-                            OrderedDict({
-                                'description': 'List of specific fields to report.',
-                                'in': 'query',
-                                'name': 'fields',
-                                'required': False,
-                                'type': 'string',
-                                'default': 'fq_name, uuid, href',
-                            }),
-                            OrderedDict({
-                                'description': 'Count of resource',
-                                'in': 'query',
-                                'name': 'count',
-                                'required': False,
-                                'type': 'boolean',
-                                'default': False,
-                            }),
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/ResourceListSummary'
-                                }),
-                            }),
-                        }),
-                    }),
-                    'post': OrderedDict({
-                        'tags': [ ident_name ],
-                        'summary': 'Create a new %s' %(ident_name),
-                        'parameters': [
-                            OrderedDict({
-                                'in': 'body',
-                                'name': '%s' %(ident_name),
-                                'schema': {
+            path_tags = [ident_name]
+            is_derived_set = set([pl['is_derived'] for _, pl in datamodel_objects[ident_name]['parents'].items()])
+            if True in is_derived_set:
+                path_tags.append('system-created')
+            if False in is_derived_set:
+                path_tags.append('user-created')
+
+            paths.update(OrderedDict([
+                ('/%s/{id}' %(ident_name), OrderedDict([
+                    ('get', OrderedDict([
+                        ('tags', path_tags + ['read']),
+                        ('summary', 'Fetch a specific %s' %(ident_name)),
+                        ('parameters', [
+                            OrderedDict([
+                                ('name', 'id'),
+                                ('description', 'The id of resource'),
+                                ('in', 'path'),
+                                ('required', True),
+                                ('type', 'string')
+                            ]),
+                            OrderedDict([
+                                ('name', 'fields'),
+                                ('description', 'If specified, backref and children fields '
+                                                'to be returned (properties and refs always returned)'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('collectionFormat', 'csv')
+                            ]),
+                            OrderedDict([
+                                ('name', 'exclude_back_refs'),
+                                ('description', 'If specified, backref fields will not be returned'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('allowEmptyValue', True),
+                            ]),
+                            OrderedDict([
+                                ('name', 'exclude_children'),
+                                ('description', 'If specified, children fields will not be returned'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('allowEmptyValue', True),
+                            ]),
+                            OrderedDict([
+                                ('name', 'exclude_hrefs'),
+                                ('description', 'Omit reporting href field for children/refs/backrefs.'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('allowEmptyValue', True),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/%sReadAll' %(camel_name)),
+                                ])),
+                            ])),
+                            ('404', OrderedDict([
+                                ('description', 'Not Found'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Error'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                    ('put', OrderedDict([
+                        ('tags', path_tags + ['update']),
+                        ('summary', 'Update a specific %s' %(ident_name)),
+                        ('parameters', [
+                            OrderedDict([
+                                ('description', 'The id of resource'),
+                                ('in', 'path'),
+                                ('name', 'id'),
+                                ('required', True),
+                                ('type', 'string'),
+                            ]),
+                            OrderedDict([
+                                ('in', 'body'),
+                                ('name', '%s' %(ident_name)),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/%sUpdate' %(camel_name)),
+                                ])),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Uuid'),
+                                ])),
+                            ])),
+                            ('404', OrderedDict([
+                                ('description', 'Not Found'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Error'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                    ('delete', OrderedDict([
+                        ('tags', path_tags + ['delete']),
+                        ('summary', 'Delete a specific %s' %(ident_name)),
+                        ('parameters', [
+                            OrderedDict([
+                                ('description', 'The id of resource'),
+                                ('in', 'path'),
+                                ('name', 'id'),
+                                ('required', True),
+                                ('type', 'string'),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Uuid'),
+                                ])),
+                            ])),
+                            ('404', OrderedDict([
+                                ('description', 'Not Found'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Error'),
+                                ])),
+                            ])),
+                            ('409', OrderedDict([
+                                ('description', 'Conflict'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Error'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                ])),
+                ('/%ss' %(ident_name), OrderedDict([
+                    ('get', OrderedDict([
+                        ('tags', path_tags + ['list']),
+                        ('summary', 'List collection of %s' %(ident_name)),
+                        ('parameters', [
+                            OrderedDict([
+                                ('name', 'detail'),
+                                ('description', 'Report all :ref:`property and reference <%sReadDetail-label>`'
+                                                ' fields of resource' %(camel_name)),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'boolean'),
+                                ('default', False),
+                            ]),
+                            OrderedDict([
+                                ('name', 'fields'),
+                                ('description', 'CSV List of specific :ref:`fields <%sReadAll-label>`'
+                                                ' to report' %(camel_name)),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('collectionFormat', 'csv'),
+                                ('default', 'fq_name, uuid, href'),
+                            ]),
+                            OrderedDict([
+                                ('name', 'filters'),
+                                ('description', 'CSV List of <property field>==<value> to match for reported collection.'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('collectionFormat', 'csv')
+                            ]),
+                            OrderedDict([
+                                ('name', 'count'),
+                                ('description', 'Only report count of resource collection matching anchor criteria'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'boolean'),
+                                ('default', False),
+                            ]),
+                            OrderedDict([
+                                ('name', 'exclude_hrefs'),
+                                ('description', 'Omit reporting href field in collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('allowEmptyValue', True),
+                            ]),
+                            OrderedDict([
+                                ('name', 'shared'),
+                                ('description', 'Include globally shared resources in collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'boolean'),
+                            ]),
+                            OrderedDict([
+                                ('name', 'parent_type'),
+                                ('description', 'This along with parent_fq_name_str can be used as anchor'
+                                                ' for collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                            ]),
+                            OrderedDict([
+                                ('name', 'parent_fq_name_str'),
+                                ('description', 'This along with parent_type can be used as anchor'
+                                                ' for collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                            ]),
+                            OrderedDict([
+                                ('name', 'parent_id'),
+                                ('description', 'List of csv parent uuids that form anchor'
+                                                ' for collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('collectionFormat', 'csv'),
+                            ]),
+                            OrderedDict([
+                                ('name', 'back_ref_id'),
+                                ('description', 'List of csv backref uuids that form anchor'
+                                                ' for collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('collectionFormat', 'csv'),
+                            ]),
+                            OrderedDict([
+                                ('name', 'obj_uuids'),
+                                ('description', 'List of object uuids for collection report'),
+                                ('in', 'query'),
+                                ('required', False),
+                                ('type', 'string'),
+                                ('collectionFormat', 'csv'),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/ResourceListSummary'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                    ('post', OrderedDict([
+                        ('tags', path_tags + ['create']),
+                        ('summary', 'Create a new %s' %(ident_name)),
+                        ('parameters', [
+                            OrderedDict([
+                                ('in', 'body'),
+                                ('name', '%s' %(ident_name)),
+                                ('schema', {
                                     '$ref': '#/definitions/%sCreate' %(camel_name),
-                                },
-                                'required': True,
-                                'description': 'Body of %s resource' %(ident_name),
-                            }),
-                        ],
-                        'responses': OrderedDict({
-                            '200': OrderedDict({
-                                'description': 'Success',
-                                'schema': OrderedDict({
-                                    '$ref': '#/definitions/Uuid'
                                 }),
-                            }),
-                        }),
-                    }),
-                }),
-            }))
+                                ('required', True),
+                                ('description', 'Body of %s resource' %(ident_name)),
+                            ]),
+                        ]),
+                        ('responses', OrderedDict([
+                            ('200', OrderedDict([
+                                ('description', 'Success'),
+                                ('schema', OrderedDict([
+                                    ('$ref', '#/definitions/Uuid'),
+                                ])),
+                            ])),
+                        ])),
+                    ])),
+                ])),
+            ]))
         # end for all idents
 
         #pprint.pprint(dict(openapi_dict))
@@ -3223,7 +3497,7 @@ class IFMapApiGenerator(object):
                 else:
                     return item_info['type']
             elif 'allOf' in item_info:
-                return '\n'.join([get_schema_str(i) 
+                return '\n'.join([get_schema_str(i)
                                  for i in item_info['allOf']])
             else:
                 return ''
@@ -3345,7 +3619,7 @@ class IFMapApiGenerator(object):
                             write(gen_file, "|%s|%s %s|%s|%s|%s" %(
                                 type_str, name_str, presence_str, desc_str,
                                 schema_str, default_str))
-     
+
                 # end all params on oper
                 write(gen_file, "|===")
                 write(gen_file, "")
@@ -3404,4 +3678,425 @@ class IFMapApiGenerator(object):
         # end for all definitions
         write(gen_file, "")
     # end _generate_docs_asciidoc
-#end class IFMapApiGenerator
+
+    def _generate_docs_sphinx(self, gen_fname, gen_type_pfx, openapi_dict):
+        def csv_scrub(col_str):
+            return '"%s"' %(col_str.replace('\n', ' ').replace('"', "'"))
+
+        def get_schema_str(item_info):
+            if not item_info:
+                return ''
+            elif '$ref' in item_info:
+                schema_type = item_info['$ref'].split('/')[-1]
+                return '`%s`_' %(schema_type)
+            elif 'type' in item_info:
+                if item_info['type'].lower() == 'array':
+                    if '$ref' in item_info['items']:
+                        item_type = item_info['items']['$ref'].split('/')[-1]
+                        return '`%s`_ array' %(item_type)
+                    elif 'type' in item_info['items']:
+                        item_type = item_info['items']['type']
+                        return csv_scrub('< %s > array' %(item_type))
+                elif 'enum' in item_info:
+                    return csv_scrub('Any of %s' %([str(x) for x in item_info['enum']]))
+                else:
+                    return item_info['type']
+            elif 'allOf' in item_info:
+                return ' '.join([get_schema_str(i)
+                                  for i in item_info['allOf']])
+            else:
+                return ''
+        # end get_schema_str
+
+        def get_schema_name(item_info):
+            if not item_info:
+                return []
+            if '$ref' in item_info:
+                schema_type = item_info['$ref'].split('/')[-1]
+                return [schema_type]
+            if 'type' in item_info:
+                if item_info['type'].lower() == 'array':
+                    if '$ref' in item_info['items']:
+                        item_type = item_info['items']['$ref'].split('/')[-1]
+                        return [item_type]
+            elif 'allOf' in item_info:
+                return [get_schema_name(i) for i in item_info['allOf']]
+            return []
+        # end get_schema_name
+
+        def get_props_and_allof(defn_info):
+            ret_props = OrderedDict()
+            ret_required = []
+            for allof_item in defn_info.get('allOf', []):
+                for item_key, item_info in allof_item.items():
+                    if item_key == 'properties':
+                        ret_props.update(item_info)
+                    elif item_key == '$ref':
+                        defn_type = item_info.split('/')[-1]
+                        recurse_props, recurse_required = get_props_and_allof(
+                            openapi_dict['definitions'][defn_type])
+                        ret_props.update(recurse_props)
+                        ret_required.extend(recurse_required)
+                    elif item_key == 'required':
+                        ret_required.extend(item_info)
+                # for all keys in allof item
+            # end for allof
+            ret_props.update(defn_info.get('properties', OrderedDict()))
+            ret_required.extend(defn_info.get('required', []))
+            return ret_props, ret_required
+        # end get_props_and_allof
+
+        gen_file = self._xsd_parser.makeFile(gen_fname)
+        write(gen_file, "")
+        write(gen_file, "========================================")
+        write(gen_file, "Contrail Configuration API Specification")
+        write(gen_file, "========================================")
+        write(gen_file, "")
+        write(gen_file, "")
+        write(gen_file, "Configuration objects in Contrail are created either by")
+        write(gen_file, "")
+        write(gen_file, "  * User (via GUI, api or an external program) for abstractions visible to End Users.")
+        write(gen_file, "  * System (contrail processes like contrail-schema, contrail-svc-monitor etc.)")
+        write(gen_file, "    to aid in functioning of all the control components/services.")
+        write(gen_file, "")
+        write(gen_file, "So for e.g. an end-user might create a virtual-network, but the system creates a")
+        write(gen_file, "routing-instance and route-target for that virtual-network.")
+
+        used_schemas = set()
+        user_obj_types = set([])
+        system_obj_types = set([])
+        for res_type, dmo in openapi_dict['x-datamodel']['objects'].items():
+            if not dmo.get('parents'):
+                user_obj_types.add(res_type)
+                continue
+            for parent_link in dmo['parents'].values():
+                if parent_link['is_derived']:
+                    system_obj_types.add(res_type)
+                else:
+                    user_obj_types.add(res_type)
+        write(gen_file, "")
+        write(gen_file, 'User created object types')
+        write(gen_file, '=========================')
+        write(gen_file, '.. hlist::')
+        write(gen_file, '    :columns: 3')
+        write(gen_file, '')
+
+        user_obj_types_str = '    * ' + '\n    * '.join([':ref:`%s <%s-label>`' %(uot, uot) for uot in user_obj_types])
+        write(gen_file, user_obj_types_str)
+        #for user_obj_type in user_obj_types:
+        #    write(gen_file, "     :ref:`%s <%s-label>`" %(user_obj_type, user_obj_type))
+        #write(gen_file, "    "+ ', '.join(list(user_obj_types)))
+        write(gen_file, "")
+        write(gen_file, 'System created object types')
+        write(gen_file, '===========================')
+        write(gen_file, '.. hlist::')
+        write(gen_file, '    :columns: 3')
+        write(gen_file, '')
+        sys_obj_types_str = '    * ' + '\n    * '.join([':ref:`%s <%s-label>`' %(sot, sot) for sot in system_obj_types])
+        write(gen_file, sys_obj_types_str)
+        #for sys_obj_type in system_obj_types:
+        #    write(gen_file, "    * "+sys_obj_type)
+        #write(gen_file, "    "+ ', '.join(list(system_obj_types)))
+
+        write(gen_file, "")
+        write(gen_file, 'Type specific REST API and data model')
+        write(gen_file, '======================================')
+        for resource_type, datamodel_object in openapi_dict['x-datamodel']['objects'].items():
+            write(gen_file, '.. _%s-label: ' %(resource_type))
+            write(gen_file, '')
+            write(gen_file, resource_type)
+            write(gen_file, '-'*len(resource_type))
+            write(gen_file, 'Data Model')
+            write(gen_file, '^^^^^^^^^^')
+            write(gen_file, '*Description*')
+            for desc_line in datamodel_object.get('description', '').split('\n'):
+                write(gen_file, '        ' + desc_line)
+            else:
+                write(gen_file, '')
+            if not datamodel_object.get('parents'):
+                write(gen_file, '*Parents*: None')
+            else:
+                write(gen_file, '*Parents*: %s' %(', '.join(
+                    [':ref:`%s <%s-label>`' %(p, p) for p in datamodel_object.get('parents', [])])))
+            write(gen_file, '')
+            write(gen_file, '*Children*')
+            children = [res_type for res_type, dmo in openapi_dict['x-datamodel']['objects'].items()
+                                           if resource_type in dmo.get('parents', [])]
+            if not children:
+                write(gen_file, '        None')
+            else:
+                write(gen_file, '        ' + ', '.join(
+                    [':ref:`%s <%s-label>`' %(c, c) for c in children]))
+
+            write(gen_file, '')
+            write(gen_file, '*Properties*')
+            write(gen_file, '')
+            if datamodel_object.get('properties'):
+                write(gen_file, '.. csv-table::')
+                write(gen_file, '    :header: "Name", "Description", "Required", "Type", "Operations", "Created By"')
+                write(gen_file, '')
+            else:
+                write(gen_file, '')
+            for prop_name, prop_info in datamodel_object.get('properties', {}).items():
+                prop_desc = csv_scrub(prop_info.get('description', 'None').replace('\n', ' '))
+                prop_reqd = prop_info['required']
+                if '$ref' in prop_info:
+                    prop_type = prop_info['$ref'].split('/')[-1]
+                    prop_type_str = ':ref:`%s <%s-label>`' %(prop_type, prop_type)
+                    used_schemas.add(prop_type)
+                else:
+                    prop_type_str = prop_info['type']
+                prop_oper = prop_info.get('operations')
+                prop_by = prop_info.get('created-by')
+                write(gen_file, '        %s, %s, %s, %s, %s, %s' %(
+                    prop_name, prop_desc, prop_reqd, prop_type_str, prop_oper, prop_by))
+                write(gen_file, '')
+            write(gen_file, '')
+            write(gen_file, '*References*')
+            write(gen_file, '')
+            if datamodel_object.get('references'):
+                write(gen_file, '.. csv-table::')
+                write(gen_file, '    :header: "To", "Description", "Required", "Type", "Operations", "Created By"')
+                write(gen_file, '')
+            else:
+                write(gen_file, '    None')
+            for ref_name, ref_info in datamodel_object.get('references', {}).items():
+                ref_desc = csv_scrub(ref_info.get('description', 'None').replace('\n', ' '))
+                ref_reqd = ref_info.get('required')
+                ref_attr = ref_info.get('attr', {}).get('$ref', 'None').split('/')[-1]
+                ref_oper = ref_info.get('operations')
+                ref_by = ref_info.get('created-by')
+                write(gen_file, '    :ref:%s `%s-label`, %s, %s, %s, %s, %s' %(
+                    ref_name, ref_name, ref_desc, ref_reqd, ref_attr, ref_oper, ref_by))
+                if ref_attr:
+                    used_schemas.add(ref_attr)
+                write(gen_file, '')
+            write(gen_file, '')
+            write(gen_file, '*Back References*')
+            write(gen_file, '')
+            backrefs = set([])
+            for res_type, dmo in openapi_dict['x-datamodel']['objects'].items():
+                if res_type == resource_type:
+                    continue
+                if resource_type in dmo.get('references', {}):
+                    backrefs.add(res_type)
+            if backrefs:
+                write(gen_file, '    ' + ', '.join([':ref:%s `%s-label`'%(b, b) for b in backrefs]))
+            else:
+                write(gen_file, '    None')
+            write(gen_file, '')
+            write(gen_file, 'REST API')
+            write(gen_file, '^^^^^^^^')
+            for path_name, path_info in openapi_dict['paths'].items():
+                if resource_type not in path_name:
+                    continue
+
+                for oper_name, oper_info in path_info.items():
+                    write(gen_file, '**%s**'%(oper_info['summary']))
+                    write(gen_file, "")
+                    write(gen_file, "%s %s" %(oper_name.upper(), path_name))
+                    write(gen_file, "")
+                    write(gen_file, "*Parameters*")
+                    write(gen_file, "")
+                    write(gen_file, ".. csv-table::")
+                    write(gen_file, '    :header: "Type", "Name", "Description", "Schema", "Default"')
+                    write(gen_file, "")
+
+                    for param_info in oper_info['parameters']:
+                        type_str = '**%s**' %(param_info['in'])
+                        if param_info['in'].lower() == 'path':
+                            presence_str = '*required*'
+                        elif (param_info.get('required') and
+                              param_info['required']):
+                            presence_str = '*required*'
+                        else:
+                            presence_str = '*optional*'
+                        if 'name' in param_info:
+                            name_str = '**%s**' %(param_info['name'])
+                            desc_str = csv_scrub(param_info.get('description', ''))
+                            if param_info['in'].lower() == 'query':
+                                schema_str = get_schema_str(param_info)
+                                schema_names = get_schema_name(param_info)
+                                default_str = param_info.get('default', '')
+                            else:
+                                schema_str = get_schema_str(param_info.get('schema'))
+                                schema_names = get_schema_name(param_info.get('schema'))
+                                default_str = ''
+                            write(gen_file, "    %s, %s %s, %s, %s, %s" %(
+                                type_str, name_str, presence_str,
+                                desc_str, schema_str, default_str))
+                            used_schemas |= set(schema_names)
+                        else: # anonymous parameter
+                            schema_type = param_info['schema']['$ref'].split(
+                                              '/')[-1]
+                            oap_props, oap_required = get_props_and_allof(
+                                openapi_dict['definitions'][schema_type])
+                            for oap_name, oap_info in oap_props.items():
+                                name_str = '**%s**' %(oap_name)
+                                if oap_name in oap_required:
+                                    presence_str = '*required*'
+                                else:
+                                    presence_str = '*optional*'
+                                desc_str = csv_scrub(oap_info.get('description', ''))
+                                schema_str = get_schema_str(oap_info)
+                                schema_names = get_schema_name(oap_info)
+                                default_str = ''
+                                write(gen_file, "    %s, %s %s, %s, %s, %s" %(
+                                    type_str, name_str, presence_str, desc_str,
+                                    schema_str, default_str))
+                                used_schemas |= set(schema_names)
+                    write(gen_file, "")
+
+                    # end all params on oper
+
+                    write(gen_file, "*Responses*")
+                    write(gen_file, "")
+                    write(gen_file, ".. csv-table::")
+                    write(gen_file, '    :header: "HTTP Code", "Description", "Schema"')
+                    write(gen_file, "")
+                    for rsp_code, rsp_info in oper_info['responses'].items():
+                        code_str = "**%s**" %(rsp_code)
+                        desc_str = csv_scrub(rsp_info.get('description', ''))
+                        schema_str = get_schema_str(rsp_info.get('schema'))
+                        schema_names = get_schema_name(rsp_info.get('schema'))
+                        write(gen_file, "    %s, %s, %s" %(
+                            code_str, desc_str, schema_str))
+                        used_schemas |= set(schema_names)
+                    # end all responses on oper
+                    write(gen_file, '')
+                # end for all oper on path
+                write(gen_file, '')
+            # end for all paths on resource_type
+            write(gen_file, '')
+        # end for all resource types
+
+        write(gen_file, "")
+        write(gen_file, 'Generic REST API')
+        write(gen_file, '================')
+        datamodel_object_types = openapi_dict['x-datamodel']['objects'].keys()
+        generic_path_items = dict((pname, pinfo) for pname, pinfo in openapi_dict['paths'].items()
+                                                 if not any([x in pname for x in datamodel_object_types]))
+        for path_name, path_info in generic_path_items.items():
+            for oper_name, oper_info in path_info.items():
+                write(gen_file, '**%s**'%(oper_info['summary']))
+                write(gen_file, "")
+                write(gen_file, "%s %s" %(oper_name.upper(), path_name))
+                write(gen_file, "")
+                write(gen_file, "*Parameters*")
+                write(gen_file, "")
+                write(gen_file, ".. csv-table::")
+                write(gen_file, '    :header: "Type", "Name", "Description", "Schema", "Default"')
+                write(gen_file, "")
+
+                for param_info in oper_info['parameters']:
+                    type_str = '**%s**' %(param_info['in'])
+                    if param_info['in'].lower() == 'path':
+                        presence_str = '*required*'
+                    elif (param_info.get('required') and
+                          param_info['required']):
+                        presence_str = '*required*'
+                    else:
+                        presence_str = '*optional*'
+                    if 'name' in param_info:
+                        name_str = '**%s**' %(param_info['name'])
+                        desc_str = csv_scrub(param_info.get('description', ''))
+                        if param_info['in'].lower() == 'query':
+                            schema_str = get_schema_str(param_info)
+                            schema_names = get_schema_name(param_info)
+                            default_str = param_info.get('default', '')
+                        else:
+                            schema_str = get_schema_str(param_info.get('schema'))
+                            schema_names = get_schema_name(param_info.get('schema'))
+                            default_str = ''
+                        write(gen_file, "    %s, %s %s, %s, %s, %s" %(
+                            type_str, name_str, presence_str,
+                            desc_str, schema_str, default_str))
+                        used_schemas |= set(schema_names)
+                    else: # anonymous parameter
+                        schema_type = param_info['schema']['$ref'].split(
+                                          '/')[-1]
+                        oap_props, oap_required = get_props_and_allof(
+                            openapi_dict['definitions'][schema_type])
+                        for oap_name, oap_info in oap_props.items():
+                            name_str = '**%s**' %(oap_name)
+                            if oap_name in oap_required:
+                                presence_str = '*required*'
+                            else:
+                                presence_str = '*optional*'
+                            desc_str = csv_scrub(oap_info.get('description', ''))
+                            schema_str = get_schema_str(oap_info)
+                            schema_names = get_schema_name(oap_info)
+                            default_str = ''
+                            write(gen_file, "    %s, %s %s, %s, %s, %s" %(
+                                type_str, name_str, presence_str, desc_str,
+                                schema_str, default_str))
+                            used_schemas |= set(schema_names)
+                write(gen_file, "")
+
+                # end all params on oper
+
+                write(gen_file, "*Responses*")
+                write(gen_file, "")
+                write(gen_file, ".. csv-table::")
+                write(gen_file, '    :header: "HTTP Code", "Description", "Schema"')
+                write(gen_file, "")
+                for rsp_code, rsp_info in oper_info['responses'].items():
+                    code_str = "**%s**" %(rsp_code)
+                    desc_str = csv_scrub(rsp_info.get('description', ''))
+                    schema_str = get_schema_str(rsp_info.get('schema'))
+                    schema_names = get_schema_name(rsp_info.get('schema'))
+                    write(gen_file, "    %s, %s, %s" %(
+                        code_str, desc_str, schema_str))
+                    used_schemas |= set(schema_names)
+                # end all responses on oper
+                write(gen_file, '')
+            # end for all oper on path
+            write(gen_file, '')
+
+        write(gen_file, "")
+        write(gen_file, "Definitions")
+        write(gen_file, "===========")
+        write(gen_file, "")
+        def generate_def(defn_name, defn_info):
+            now_used_schemas = set()
+            oap_props, oap_required = get_props_and_allof(defn_info)
+            if not oap_props:
+                return now_used_schemas
+            write(gen_file, '.. _%s-label: ' %(defn_name))
+            write(gen_file, "")
+            write(gen_file, defn_name)
+            write(gen_file, "-"*len(defn_name))
+            write(gen_file, "")
+            write(gen_file, ".. csv-table::")
+            write(gen_file, '    :header: "Name", "Description", "Schema"')
+            write(gen_file, "")
+            for oap_name, oap_info in oap_props.items():
+                name_str = '**%s**' %(oap_name)
+                if oap_name in oap_required:
+                    presence_str = '*required*'
+                else:
+                    presence_str = '*optional*'
+                desc_str = csv_scrub(oap_info.get('description', ''))
+                schema_str = get_schema_str(oap_info)
+                schema_names = get_schema_name(oap_info)
+                write(gen_file, "    %s %s, %s, %s" %(
+                    name_str, presence_str, desc_str, schema_str))
+                now_used_schemas |= set(schema_names)
+            write(gen_file, "")
+            return now_used_schemas - used_schemas
+        deferred_schemas = set()
+        for defn_name, defn_info in openapi_dict['definitions'].items():
+            if (defn_name in used_schemas or
+                defn_name.endswith('ReadDetail') or defn_name.endswith('ReadAll')):
+                deferred_schemas |= generate_def(defn_name, defn_info)
+        while True:
+            if not deferred_schemas:
+                break
+            schema_name = deferred_schemas.pop()
+            used_schemas.add(schema_name)
+            deferred_schemas |= generate_def(schema_name, openapi_dict['definitions'][schema_name])
+
+        # end for all definitions
+        write(gen_file, "")
+    # end _generate_docs_sphinx
+# end class IFMapApiGenerator

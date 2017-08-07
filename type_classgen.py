@@ -25,8 +25,11 @@ class TypeClassGenerator(object):
             member = members[0]
             cdecl = """
     typedef %(vectype)s::const_iterator const_iterator;
+    typedef %(vectype)s::size_type size_type;
     const_iterator begin() const { return %(membername)s.begin(); }
     const_iterator end() const { return %(membername)s.end(); }
+    size_type size() const { return %(membername)s.size(); }
+    bool empty() const { return %(membername)s.empty(); }
 """  % {'vectype': member.ctypename, 'membername': member.membername}
             file.write(cdecl)
         
@@ -40,6 +43,9 @@ class TypeClassGenerator(object):
                                  std::auto_ptr<AutogenProperty> *resultp);
     void Encode(pugi::xml_node *node) const;
     void CalculateCrc(boost::crc_32_type *crc) const;
+    bool JsonParse(const contrail_rapidjson::Value &node);
+    static bool JsonParseProperty(const contrail_rapidjson::Value &node,
+                                  std::auto_ptr<AutogenProperty> *resultp);
 };
 """ % (ctype.getName())
         file.write(tail)
@@ -65,6 +71,8 @@ namespace pugi {
 class xml_node;
 class xml_document;
 }  // namespace pugi
+
+#include "rapidjson/document.h"
 
 #include "ifmap/autogen.h"
 
