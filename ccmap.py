@@ -8,7 +8,9 @@ from ifmap_classgen import IFMapClassGenerator, IFMapImplGenerator
 from ifmap_parser import IFMapParserGenerator
 from ifmap_frontend import IFMapApiGenerator
 from java_api import JavaApiGenerator
+from device_api import DeviceApiGenerator
 from golang_api import GoLangApiGenerator
+from json_schemagen import JsonSchemaGenerator
 
 class IFMapGenerator(object):
     """ IFMap generator
@@ -161,9 +163,19 @@ class IFMapGenerator(object):
                                   self._Identifiers, self._Metadata)
         apigen.Generate(self._Parser.outFilename)
 
+    def _GenerateDeviceApi(self, xsd_root):
+        apigen = DeviceApiGenerator(self._Parser, xsd_root,
+                                  self._Identifiers, self._Metadata)
+        apigen.Generate(self._Parser.outFilename)
+
     def _GenerateGoLangApi(self, xsd_root):
         apigen = GoLangApiGenerator(self._Parser, self._cTypesDict,
                                     self._Identifiers, self._Metadata)
+        apigen.Generate(self._Parser.outFilename)
+
+    def _GenerateJsonSchema(self, xsd_root):
+        apigen = JsonSchemaGenerator(self._Parser, self._cTypesDict,
+                                  self._Identifiers, self._Metadata)
         apigen.Generate(self._Parser.outFilename)
 
 
@@ -183,5 +195,9 @@ class IFMapGenerator(object):
             self._GenerateFrontendClassDefinitions(root)
         elif self._genCategory == 'java-api':
             self._GenerateJavaApi(root)
+        elif self._genCategory == 'device-api':
+            self._GenerateDeviceApi(root)
         elif self._genCategory == 'golang-api':
             self._GenerateGoLangApi(root)
+        elif self._genCategory == 'json-schema':
+            self._GenerateJsonSchema(root)

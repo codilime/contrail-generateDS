@@ -142,6 +142,10 @@ func (obj *%(typecamel)s) Add%(fieldcamel)s(value %(ptr)s%(fieldtype)s) {
                }
             file.write(decl)
 
+        # mark as generated
+        ctypename = ctype.getName()
+        self._top_level_map[ctypename] = self._type_map[ctypename]
+
     # end _GenerateCType
 
     def _ExamineInnerTypes(self, inner_type_map, top_level, ctype):
@@ -279,7 +283,7 @@ type %(camel)s struct {
         parent_type = ""
         parents = ident.getParents()
         if parents:
-            (parent, meta) = parents[0]
+            (parent, meta, _) = parents[0]
             quoted_list = map(lambda x: '"%s"' % x, parent.getDefaultFQName())
             parent_fqn = ', '.join(quoted_list)
             parent_type = parent.getName()

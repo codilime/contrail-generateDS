@@ -5,6 +5,12 @@ import textwrap
 from pprint import pformat
 from collections import OrderedDict
 
+def escape_string(instring):
+    s1 = instring
+    s1 = s1.replace('\\', '\\\\')
+    s1 = s1.replace("'", "\\'")
+    return s1
+
 class TypeGenerator(object):
     def __init__(self, parser_generator):
         self._PGenr = parser_generator
@@ -19,8 +25,10 @@ class TypeGenerator(object):
     def generate(self, root, infile, outfileName, genStandAlone = True,
                  openapi_dict = None):
         self._genStandAlone = genStandAlone
-        self._openapi_dict = openapi_dict
-        self._openapi_dict['definitions'] = {}
+        self._openapi_dict = OrderedDict([])
+        if openapi_dict is not None:
+            self._openapi_dict = openapi_dict
+        self._openapi_dict['definitions'] = OrderedDict([])
         # Create an output file.
         # Note that even if the user does not request an output file,
         #   we still need to go through the process of generating classes
@@ -227,8 +235,8 @@ class TypeGenerator(object):
             name = self._PGenr.cleanupName(attrDef.getName().replace(':', '_'))
             mappedName = self._PGenr.mapName(name)
             gsName = self._PGenr.make_gs_name(name)
-            self._LangGenr.generateGetter(wrt, gsName, mappedName)
-            self._LangGenr.generateSetter(wrt, gsName, mappedName)
+            self._LangGenr.generateGetter(wrt, gsName, mappedName, attrDef.getType())
+            self._LangGenr.generateSetter(wrt, gsName, mappedName, attrDef.getType())
             if self._PGenr.GenerateProperties:
                 self._LangGenr.generateProperty(wrt, name, gsName, gsName)
             typeName = attrDef.getType()
@@ -332,7 +340,7 @@ class TypeGenerator(object):
             name = attrDef.getName()
             cleanName = self._PGenr.cleanupName(name)
             capName = self._PGenr.make_gs_name(cleanName)
-            mappedName = mapName(cleanName)
+            mappedName = self._PGenr.mapName(cleanName)
             data_type = attrDef.getData_type()
             attrType = attrDef.getType()
             if attrType in self._PGenr.SimpleTypeDict:
@@ -644,10 +652,23 @@ class PyGenerator(object):
 
         wrt(s1)
         wrt('    """\n')
-        openapi_dict['definitions'][name] = OrderedDict({
-            'properties':OrderedDict({}), 'required': []})
+        openapi_dict['definitions'][name] = OrderedDict([
+            ('properties', OrderedDict({})),
+            ('required', []),
+        ])
         openapi_properties = openapi_dict['definitions'][name]['properties']
         openapi_required = openapi_dict['definitions'][name]['required']
+
+        description = self.get_description(self._PGenr.ElementDict[name].attrs)
+        if description:
+            openapi_dict['definitions'][name]['description'] = ' '.join(description)
+            wrt('    Description:\n')
+            for d_line in description:
+                for w_line in textwrap.wrap(d_line, 80,
+                                            break_long_words=False):
+                    wrt('        %s\n\n' %(w_line))
+
+        wrt('    Attributes:\n')
         for child in self._PGenr.ElementDict[name].children:
             def get_doc_info(attrs):
                 doc_info = {}
@@ -711,7 +732,7 @@ class PyGenerator(object):
                         description_lines.append(w_line)
                         wrt('          %s\n\n' %(w_line))
 
-            openapi_properties[child.name.replace('-', '_')] = {}
+            openapi_properties[child.name.replace('-', '_')] = OrderedDict([])
             openapi_prop = openapi_properties[child.name.replace('-', '_')]
             if description_lines:
                 openapi_prop['description'] = '\n'.join(description_lines)
@@ -836,6 +857,7 @@ class PyGenerator(object):
                                           'attr_type': attr_type,
                                           'simple_type' : child.getSchemaType()}
 
+        wrt('    class_description = %s\n' %(self.get_description(element.attrs)))
         wrt('    attr_fields = %s\n' %(attr_fields))
         wrt('    attr_field_type_vals = %s\n' %(attr_field_type_vals))
 
@@ -981,10 +1003,10 @@ class PyGenerator(object):
         for key in attrDefs:
             attrDef = attrDefs[key]
             mappedName = self._PGenr.cleanupName(attrDef.getName())
-            mappedName = mapName(mappedName)
+            mappedName = self._PGenr.mapName(mappedName)
             logging.debug("Constructor attribute: %s" % mappedName)
             pythonType = self._PGenr.SchemaToPythonTypeMap.get(attrDef.getType())
-            attrVal = "_cast(%s, %s)" % (pythonType, mappedName)
+            attrVal = "cast_(%s, %s)" % (pythonType, mappedName)
             wrt('        self.%s = %s\n' % (mappedName, attrVal))
             member = 1
         # Generate member initializers in ctor.
@@ -1103,7 +1125,7 @@ class PyGenerator(object):
             return default
         elif etype in types.StringType + (types.TokenType, \
                        types.DateTimeType, types.TimeType, types.DateType):
-            escape_default = self.escape_string(default)
+            escape_default = escape_string(default)
             return "\'" + escape_default + "\'"
         elif etype == types.BooleanType:
             if default in ('false', '0'):
@@ -1120,7 +1142,7 @@ class PyGenerator(object):
             name = attrDef.getName()
             default = attrDef.getDefault()
             mappedName = name.replace(':', '_')
-            mappedName = self._PGenr.cleanupName(mapName(mappedName))
+            mappedName = self._PGenr.cleanupName(self._PGenr.mapName(mappedName))
             if mappedName in addedArgs:
                 continue
             addedArgs[mappedName] = 1
@@ -1264,7 +1286,7 @@ class PyGenerator(object):
         childCount = self._PGenr.countChildren(element, 0)
         name = element.getName()
         base = element.getBase()
-        wrt("    def export(self, outfile, level=1, namespace_='%s', name_='%s', namespacedef_='', pretty_print=True):\n" % \
+        wrt("    def export_xml(self, outfile, level=1, namespace_='%s', name_='%s', namespacedef_='', pretty_print=True):\n" % \
             (namespace, name, ))
         wrt('        if pretty_print:\n')
         wrt("            eol_ = '\\n'\n")
@@ -1352,7 +1374,7 @@ class PyGenerator(object):
             for key in attrDefs.keys():
                 attrDef = attrDefs[key]
                 name = attrDef.getName()
-                cleanName = mapName(self._PGenr.cleanupName(name))
+                cleanName = self._PGenr.mapName(self._PGenr.cleanupName(name))
                 capName = self._PGenr.make_gs_name(cleanName)
                 if True:            # attrDef.getUse() == 'optional':
                     wrt("        if self.%s is not None and '%s' not in already_processed:\n" % (
@@ -1459,7 +1481,7 @@ class PyGenerator(object):
             if element.isMixed():
                 wrt('%sif not fromsubclass_:\n' % (fill, ))
                 wrt("%s    for item_ in self.content_:\n" % (fill, ))
-                wrt("%s        item_.export(outfile, level, item_.name, namespace_, pretty_print=pretty_print)\n" % (
+                wrt("%s        item_.export_xml(outfile, level, item_.name, namespace_, pretty_print=pretty_print)\n" % (
                     fill, ))
             else:
                 wrt('%sif pretty_print:\n' % (fill, ))
@@ -1484,11 +1506,11 @@ class PyGenerator(object):
                         if abstract_child and child.getMaxOccurs() > 1:
                             wrt("%sfor %s_ in self.get%s():\n" % (fill,
                                 name, self._PGenr.make_gs_name(name),))
-                            wrt("%s    %s_.export(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % (
+                            wrt("%s    %s_.export_xml(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % (
                                 fill, name, name, ))
                         elif abstract_child:
                             wrt("%sif self.%s is not None:\n" % (fill, name, ))
-                            wrt("%s    self.%s.export(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % (
+                            wrt("%s    self.%s.export_xml(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % (
                                 fill, name, name, ))
                         elif child.getMaxOccurs() > 1:
                             self._generateExportFn_2(wrt, child, unmappedName, namespace, '    ')
@@ -1500,10 +1522,10 @@ class PyGenerator(object):
                 if any_type_child is not None:
                     if any_type_child.getMaxOccurs() > 1:
                         wrt('        for obj_ in self.anytypeobjs_:\n')
-                        wrt("            obj_.export(outfile, level, namespace_, pretty_print=pretty_print)\n")
+                        wrt("            obj_.export_xml(outfile, level, namespace_, pretty_print=pretty_print)\n")
                     else:
                         wrt('        if self.anytypeobjs_ is not None:\n')
-                        wrt("            self.anytypeobjs_.export(outfile, level, namespace_, pretty_print=pretty_print)\n")
+                        wrt("            self.anytypeobjs_.export_xml(outfile, level, namespace_, pretty_print=pretty_print)\n")
         return hasChildren
 
     def _generateExportFn_1(self, wrt, child, name, namespace, fill):
@@ -1575,10 +1597,10 @@ class PyGenerator(object):
             wrt("%s        if self.%s is not None:\n" % (fill, mappedName))
             # name_type_problem
             if False:        # name == child.getType():
-                s1 = "%s            self.%s.export(outfile, level, namespace_, pretty_print=pretty_print)\n" % \
+                s1 = "%s            self.%s.export_xml(outfile, level, namespace_, pretty_print=pretty_print)\n" % \
                     (fill, mappedName)
             else:
-                s1 = "%s            self.%s.export(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % \
+                s1 = "%s            self.%s.export_xml(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % \
                     (fill, mappedName, name)
             wrt(s1)
     # end _generateExportFn_1
@@ -1642,11 +1664,11 @@ class PyGenerator(object):
         else:
             # name_type_problem
             if False:        # name == child.getType():
-                s1 = "%s        %s_.export(outfile, level, namespace_, pretty_print=pretty_print)\n" % (fill, cleanName)
+                s1 = "%s        %s_.export_xml(outfile, level, namespace_, pretty_print=pretty_print)\n" % (fill, cleanName)
             else:
                 wrt("%s        if isinstance(%s_, dict):\n" %(fill, cleanName))
                 wrt("%s            %s_ = %s(**%s_)\n" %(fill, cleanName, child_type, cleanName))
-                s1 = "%s        %s_.export(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % \
+                s1 = "%s        %s_.export_xml(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % \
                     (fill, cleanName, name)
             wrt(s1)
     # end generateExportFn_2
@@ -1721,10 +1743,10 @@ class PyGenerator(object):
             wrt("%s        if self.%s is not None:\n" % (fill, mappedName))
             # name_type_problem
             if False:        # name == child.getType():
-                s1 = "%s            self.%s.export(outfile, level, namespace_, pretty_print=pretty_print)\n" % \
+                s1 = "%s            self.%s.export_xml(outfile, level, namespace_, pretty_print=pretty_print)\n" % \
                     (fill, mappedName)
             else:
-                s1 = "%s            self.%s.export(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % \
+                s1 = "%s            self.%s.export_xml(outfile, level, namespace_, name_='%s', pretty_print=pretty_print)\n" % \
                     (fill, mappedName, name)
             wrt(s1)
     # end generateExportFn_3
@@ -1780,7 +1802,7 @@ class PyGenerator(object):
             atype = attrDef.getType()
             if atype in self._PGenr.SimpleTypeDict:
                 atype = self._PGenr.SimpleTypeDict[atype].getBase()
-            self._LangGenr.generateBuildAttributeForType(wrt, element, atype, name, mappedName)
+            self._generateBuildAttributeForType(wrt, element, atype, name, mappedName)
         hasAttributes += self._generateBuildAttributeForAny(wrt, element)
         hasAttributes += self._generateBuildAttributeForExt(wrt, element)
         return hasAttributes
@@ -1848,7 +1870,7 @@ class PyGenerator(object):
                 name, ))
             wrt("            already_processed.append('%s')\n" % (name, ))
             wrt("            self.%s = value\n" % (mappedName, ))
-        typeName = attrDef.getType()
+        typeName = atype
         if typeName and typeName in self._PGenr.SimpleTypeDict:
             wrt("            self.validate_%s(self.%s)    # validate type %s\n" % (
                 typeName, mappedName, typeName, ))
@@ -2308,6 +2330,7 @@ class PyGenerator(object):
         comps = []
         hash_fields = []
         str_fields = []
+        copy_fields = []
         for child in element.getChildren():
             if child.getType() == self._PGenr.AnyTypeIdentifier:
                 continue
@@ -2317,14 +2340,24 @@ class PyGenerator(object):
                 str_fields.append('"%s = " + str(self.%s)' % (name, name))
                 if child.getMaxOccurs() > 1:
                     hash_fields.append('tuple(self.%s or [])' % name)
+                    if child.isComplex():
+                        copy_field = '[x.copy() for x in self.%s]' % name
+                    else:
+                        copy_field = 'list(self.%s)' % name
                 else:
                     hash_fields.append('self.%s' % name)
+                    if child.isComplex():
+                        copy_field = 'self.%s.copy()' % name
+                    else:
+                        copy_field = 'self.%s' % name
+                copy_fields.append((name, copy_field))
 
         if len(comps) == 0:
             wrt('    def __eq__(self, other): return True\n')
             wrt('    def __ne__(self, other): return False\n')
             wrt('    def __hash__(self): return 0\n')
             wrt('    def __repr__(self): return ''\n')
+            wrt('    def copy(self): return %s()\n' % element.getCleanName())
             return
 
         comp_str = ' and\n                    '.join(comps)
@@ -2346,7 +2379,13 @@ class PyGenerator(object):
         wrt('    def __repr__(self):\n')
         wrt('        return (%s)\n' % str_str)
         wrt('\n')
-
+        wrt('    def copy(self):\n')
+        wrt('        cp = %s()\n' % element.getCleanName())
+        for cp in copy_fields:
+            wrt('        if self.%s is not None:\n' % cp[0])
+            wrt('            cp.%s = %s\n' % (cp[0], cp[1]))
+        wrt('        return cp\n')
+        wrt('\n')
 
 class CppGenerator(object):
     def __init__(self, parser_generator):
