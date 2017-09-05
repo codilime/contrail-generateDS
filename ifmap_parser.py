@@ -360,7 +360,7 @@ static bool ParseDateTime(const pugi::xml_node &node, time_t *valuep) {
     memset(&tm, 0, sizeof(tm));
     if (value.size() == 0) return true;
     char *endp;
-    endp = strptime(value.c_str(), "%%FT%%T", &tm);
+    endp = strptime(value.c_str(), "%%Y-%%m-%%dT%%T", &tm);
     if (!endp) return false;
     *valuep = timegm(&tm);
     return true;
