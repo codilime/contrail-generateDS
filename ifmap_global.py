@@ -2,7 +2,7 @@
 # Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
 #
 
-import os.path
+import os
 
 CppTypeMap = {
     'string': 'std::string',
