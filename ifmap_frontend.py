@@ -103,7 +103,10 @@ class IFMapApiGenerator(object):
         write(gen_file, "try:")
         write(gen_file, "    from cfgm_common.exceptions import AmbiguousParentError")
         write(gen_file, "except ImportError:")
-        write(gen_file, "    pass")
+        write(gen_file, "    try:")
+        write(gen_file, "        from vnc_api.exceptions import AmbiguousParentError")
+        write(gen_file, "    except ImportError:")
+        write(gen_file, "        pass")
         write(gen_file, "")
 
         for ident in self._non_exclude_idents():
@@ -455,7 +458,7 @@ class IFMapApiGenerator(object):
                 if len(parents) > 1:
                     # use config-root if it is one of the possible parents
                     if 'config-root' in [parent_ident.getName() for (parent_ident, meta, _) in parents]:
-                        write(gen_file, "            fq_name = [name]")
+                        write(gen_file, "            self.fq_name = [name]")
                     else:
                         write(gen_file, "            # if obj constructed from within server, ignore if parent not specified")
                         write(gen_file, "            if not kwargs['parent_type']:")
@@ -797,7 +800,10 @@ class IFMapApiGenerator(object):
         write(gen_file, "import copy")
         write(gen_file, "import vnc_api.gen.%s_common" %(gen_filename_pfx))
         write(gen_file, "import vnc_api.gen.%s_xsd" %(gen_filename_pfx))
-        write(gen_file, "from cfgm_common.exceptions import NoIdError")
+        write(gen_file, "try:")
+        write(gen_file, "    from cfgm_common.exceptions import NoIdError")
+        write(gen_file, "except ImportError:")
+        write(gen_file, "    from vnc_api.exceptions import NoIdError")
         write(gen_file, "")
 
         write(gen_file, "")
@@ -1394,7 +1400,7 @@ class IFMapApiGenerator(object):
                               prop_names_uc_list):
         for key,val in enumerate(prop_list):
             prop_long_name = self._get_prop_long_name(val)
-            prop_names_list.append("'"+prop_long_name.lower()+"'")
+            prop_names_list.append("'"+prop_long_name+"'")
             prop_names_uc_list.append(prop_long_name.upper())
             if val['prop_list']:
                 self._make_heat_properties(val['prop_list'], prop_names_list,
@@ -1809,12 +1815,12 @@ class IFMapApiGenerator(object):
                 tabs = tabs+4
                 write(self.gen_file, "%stry:" %(" "*tabs))
                 tabs = tabs+4
-                write(self.gen_file, "%sparent_obj = self.vnc_lib().%s_read(id=self.properties.get(self.%s))"
+                write(self.gen_file, "%sparent_obj = self.vnc_lib().%s_read(fq_name_str=self.properties.get(self.%s))"
                     %(" "*tabs, self._uncamelize(val['prop_name']), val['prop_name'].upper()))
                 tabs = tabs-4
                 write(self.gen_file, "%sexcept vnc_api.NoIdError:" %(" "*tabs))
                 tabs = tabs+4
-                write(self.gen_file, "%sparent_obj = self.vnc_lib().%s_read(fq_name_str=self.properties.get(self.%s))"
+                write(self.gen_file, "%sparent_obj = self.vnc_lib().%s_read(id=str(uuid.UUID(self.properties.get(self.%s))))"
                     %(" "*tabs, self._uncamelize(val['prop_name']), val['prop_name'].upper()))
                 tabs = tabs-4
                 write(self.gen_file, "%sexcept:" %(" "*tabs))
@@ -1959,7 +1965,7 @@ class IFMapApiGenerator(object):
 
     def _uncamelize(self, name):
         s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
-        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1)
 
     def _generate_heat_resources(self, gen_filepath_pfx, gen_filename_pfx):
         # heat uses the generated code to build its resources
@@ -2110,7 +2116,10 @@ class IFMapApiGenerator(object):
         write(gen_file, "")
         write(gen_file, "import cfixture")
         write(gen_file, "from vnc_api import vnc_api")
-        write(gen_file, "from cfgm_common.exceptions import *")
+        write(gen_file, "try:")
+        write(gen_file, "    from cfgm_common.exceptions import *")
+        write(gen_file, "except ImportError:")
+        write(gen_file, "    from vnc_api.exceptions import *")
         write(gen_file, "")
         write(gen_file, "from generatedssuper import GeneratedsSuper")
         write(gen_file, "")
@@ -4100,3 +4109,4 @@ class IFMapApiGenerator(object):
         write(gen_file, "")
     # end _generate_docs_sphinx
 # end class IFMapApiGenerator
+
